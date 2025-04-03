@@ -1,0 +1,14 @@
+torch
+pydicom
+numpy==1.23
+Pillow
+torchvision
+torchxrayvision
+scikit-image
+pandas
+scikit-learn
+matplotlib
+seaborn
+wandb
+tqdm
+openpyxl

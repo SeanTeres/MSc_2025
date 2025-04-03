@@ -1,0 +1,28 @@
+experiments:
+  contrastive_exp1:
+    project_name: "contrastive-learning"
+    parameters:
+      batch_size: 16
+      epochs: 30
+      learning_rate: 1e-3
+      margin: 0.5
+      optimizer: "Adam"
+      loss_function: "TripletMarginLoss"
+      anchors: "ILO only"
+      target: "MBOD-combined"
+      workshop: "no"
+      num_triplets: 80
+
+  contrastive_exp2:
+    project_name: "contrastive-learning"
+    parameters:
+      batch_size: 8
+      epochs: 30
+      learning_rate: 1e-3
+      margin: 1.0
+      optimizer: "Adam"
+      loss_function: "TripletMarginLoss"
+      anchors: "ILO only"
+      target: "MBOD-combined"
+      workshop: "no"
+      num_triplets: 540

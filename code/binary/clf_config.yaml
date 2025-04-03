@@ -1,0 +1,13 @@
+# classification/config.yaml
+experiments:
+  prof-D2-FLoss-512-aug:
+    model: "resnet50-res512-all"
+    model_resolution: 512
+    target: "Profusion"
+    lr: 0.001
+    n_epochs: 50
+    batch_size: 16
+    train_dataset: "MBOD 2"
+    oversampling: true
+    loss_function: "FocalLoss"
+    augmentation: true

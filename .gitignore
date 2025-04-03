@@ -1,0 +1,6 @@
+venv/
+/home/sean/MSc/data/
+data/
+wandb/
+__pycache__/
+*.pth
