@@ -33,7 +33,7 @@ import plotly.express as px
 from matplotlib.colors import Normalize
 import plotly.graph_objects as go
 import utils.classes as classes
-
+from sklearn.preprocessing import normalize
 
 
 class BinaryFocalLoss(nn.Module):
@@ -976,7 +976,6 @@ def plot_tsne_2(anchors, anchor_labels, positives_negatives, target_labels, num_
         plt.show()
 
 
-
 def plot_tsne_3d_interactive(anchors, anchor_labels, positives_negatives, target_labels, num_classes=4, 
                               save_path=None, trained=False, epoch=None, log_wandb=False, plot_name=None):
     # Combine anchors and targets for t-SNE
@@ -1015,7 +1014,7 @@ def plot_tsne_3d_interactive(anchors, anchor_labels, positives_negatives, target
 
 
 
-from sklearn.preprocessing import normalize
+
 
 def extract_features_2(triplet_dataset, model, device, anchors_only=False):
     all_anchors = []
@@ -1075,8 +1074,8 @@ def extract_features_2(triplet_dataset, model, device, anchors_only=False):
         all_labels_pos_neg = np.concatenate(all_labels_pos_neg, axis=0)
 
         # Normalize the embeddings using L2 normalization
-        # all_anchors = normalize(all_anchors, axis=1, norm='l2')
-        # all_pos_neg = normalize(all_pos_neg, axis=1, norm='l2')
+        all_anchors = normalize(all_anchors, axis=1, norm='l2')
+        all_pos_neg = normalize(all_pos_neg, axis=1, norm='l2')
 
         return all_anchors, all_labels_anchors, all_pos_neg, all_labels_pos_neg
 

@@ -490,7 +490,7 @@ class ILOImagesDataset(Dataset):
 
         return pixel_tensor, label, filename
 
-class TripletDataset(Dataset):
+class TripletDataset_OLD(Dataset):
     def __init__(self, target_dataset, anchor_dataset, max_triplets=None):
         """
         Args:
@@ -584,3 +584,99 @@ class TripletDataset(Dataset):
 
         return anchor_img, positive_img, negative_img, anchor_label, positive_label, negative_label, anchor_filename
     
+
+
+class TripletDataset(Dataset):
+    def __init__(self, target_dataset, anchor_dataset, max_triplets=None):
+        """
+        Args:
+            target_dataset: A PyTorch Dataset (single dataset or ConcatDataset)
+            anchor_dataset: A PyTorch Dataset (e.g., ILOImagesDataset) for anchors
+            max_triplets (int, optional): Maximum number of triplets to generate
+        """
+        self.target_dataset = target_dataset
+        self.anchor_dataset = anchor_dataset
+        self.max_triplets = max_triplets
+        self.is_concat_dataset = hasattr(target_dataset, 'datasets')
+        
+        # Extract labels from metadata_df of the target dataset
+        self.class_to_indices = self._build_class_indices(target_dataset)
+
+    def _build_class_indices(self, dataset):
+        """Builds a dictionary mapping each class label to a list of indices."""
+        class_to_indices = {}
+        
+        if self.is_concat_dataset:  # For ConcatDataset
+            for i, subdataset in enumerate(dataset.datasets):
+                metadata_df = subdataset.metadata_df
+                labels = metadata_df['Profusion Label'].values
+                
+                for idx, label in enumerate(labels):
+                    label = int(label)  # Ensure consistent integer labeling
+                    if label not in class_to_indices:
+                        class_to_indices[label] = []
+                    class_to_indices[label].append((i, idx))  # (subdataset_idx, image_idx)
+        else:  # For single dataset
+            metadata_df = dataset.metadata_df
+            labels = metadata_df['Profusion Label'].values
+            
+            for idx, label in enumerate(labels):
+                label = int(label)
+                if label not in class_to_indices:
+                    class_to_indices[label] = []
+                class_to_indices[label].append(idx)  # Direct index
+        
+        return class_to_indices
+
+    def __len__(self):
+        """Return the number of triplets."""
+        if self.max_triplets:
+            return self.max_triplets
+        return len(self.anchor_dataset) * len(self.target_dataset)
+
+    def __getitem__(self, index):
+        """Returns (anchor, positive, negative) triplet along with labels."""
+        if self.max_triplets and index >= self.max_triplets:
+            raise IndexError("Exceeded maximum number of triplets")
+
+        anchor_index = random.randint(0, len(self.anchor_dataset) - 1)
+        
+        # Get the anchor sample (only from the anchor dataset)
+        anchor_img, anchor_label, anchor_filename = self.anchor_dataset[anchor_index]
+
+        # Get the positive sample (same class as the anchor, from the target dataset)
+        positive_samples = self.class_to_indices[anchor_label]
+        positive_idx = random.choice(positive_samples)  # Randomly pick a positive sample from the same class
+
+        # Ensure the positive sample is not the anchor itself
+        if self.is_concat_dataset:
+            subdataset_idx, image_idx = positive_idx
+            positive_img, positive_label = self.target_dataset.datasets[subdataset_idx][image_idx]
+        else:
+            positive_img, positive_label = self.target_dataset[positive_idx]
+        
+        assert positive_label == anchor_label, "Positive sample label does not match anchor label"
+
+        # Negative sample: Pick a sample from a different class, also from the target dataset
+        negative_label = random.choice([lbl for lbl in self.class_to_indices.keys() if lbl != anchor_label])
+
+        if self.is_concat_dataset:
+            negative_idx = random.choice(self.class_to_indices[negative_label])
+            subdataset_idx, image_idx = negative_idx
+            negative_img, _ = self.target_dataset.datasets[subdataset_idx][image_idx]
+        else:
+            negative_idx = random.choice(self.class_to_indices[negative_label])
+            negative_img, _ = self.target_dataset[negative_idx]
+
+        # Ensure that the selected negative sample is not the same as the positive
+        while negative_idx == positive_idx:
+            negative_idx = random.choice(self.class_to_indices[negative_label])
+            if self.is_concat_dataset:
+                subdataset_idx, image_idx = negative_idx
+                negative_img, _ = self.target_dataset.datasets[subdataset_idx][image_idx]
+            else:
+                negative_img, _ = self.target_dataset[negative_idx]
+
+        # print(f"A: {anchor_label}, P: {positive_label}, N: {negative_label}")
+
+        return anchor_img, positive_img, negative_img, anchor_label, positive_label, negative_label, anchor_filename

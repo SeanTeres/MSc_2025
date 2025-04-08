@@ -21,6 +21,8 @@ from tqdm import tqdm
 import random
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.neighbors import KNeighborsClassifier
+
 
 def read_and_normalize_xray(dicom_name, voi_lut=False, fix_monochrome=True, transforms=None, normalize=True):
     """Reads a DICOM file, normalizes it, and returns the tensor and pixel array."""
@@ -493,3 +495,160 @@ def plot_combined_conf_mat(predicted_label_name, dataset, predicted_labels, rele
     
     # Return the confusion matrix for further analysis
     return conf_matrix
+
+
+def compute_map(embeddings, labels):
+    print("Computing mAP...")
+    
+    # Convert to numpy arrays
+    embeddings = np.array(embeddings)
+    labels = np.array(labels)
+    
+
+    norms_before = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    
+    # Normalize embeddings to unit vectors
+    epsilon = 1e-8
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / (norms + epsilon)
+    
+  
+    # Verify norms after normalization
+    norms_after = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    
+    unique_labels = np.unique(labels)
+    
+    ap_scores = []
+    
+    for i in range(len(embeddings)):
+        # Compute cosine similarity (dot product on normalized embeddings)
+        similarity = embeddings @ embeddings[i]
+        sorted_indices = np.argsort(-similarity)[1:]  # Exclude self-match
+        
+        # Compute relevance labels
+        relevant_labels = (labels[sorted_indices] == labels[i]).astype(int)
+        
+        # Compute AP if there are any positives
+        if relevant_labels.sum() > 0:
+            ap_score = average_precision_score(relevant_labels, similarity[sorted_indices])
+            ap_scores.append(ap_score)
+        else:
+            print(f"No positives for anchor {i}, skipping AP calculation.")
+    
+    return np.mean(ap_scores) if ap_scores else 0.0
+
+def get_semi_hard_negative(anchor_feats, negative_feats, positive_feats, margin):
+    """
+    Find semi-hard negatives that are farther from the anchor than the positive,
+    but still within the margin.
+    
+    Args:
+        anchor_feats: Features of anchor samples (N x D)
+        negative_feats: Features of negative samples (N x D)
+        positive_feats: Features of positive samples (N x D)
+        margin: Margin value from triplet loss
+    
+    Returns:
+        Selected semi-hard negative features with same batch size as input
+    """
+    with torch.no_grad():
+        # Calculate distances
+        positive_dist = torch.norm(anchor_feats - positive_feats, dim=1)
+        negative_dist = torch.norm(anchor_feats - negative_feats, dim=1)
+        
+        # Find semi-hard negatives
+        semi_hard_mask = (negative_dist > positive_dist) & (negative_dist < positive_dist + margin)
+        
+        if semi_hard_mask.any():
+            # Get indices of semi-hard negatives
+            semi_hard_indices = torch.where(semi_hard_mask)[0]
+            
+            # If we don't have enough semi-hard negatives, pad with original negatives
+            if len(semi_hard_indices) < len(anchor_feats):
+                num_needed = len(anchor_feats) - len(semi_hard_indices)
+                # Get indices of non-semi-hard negatives
+                non_semi_hard_indices = torch.where(~semi_hard_mask)[0]
+                # Randomly select from non-semi-hard if available
+                if len(non_semi_hard_indices) > 0:
+                    padding_indices = non_semi_hard_indices[torch.randperm(len(non_semi_hard_indices))[:num_needed]]
+                    selected_indices = torch.cat([semi_hard_indices, padding_indices])
+                else:
+                    # If no non-semi-hard negatives, repeat semi-hard ones
+                    padding_indices = semi_hard_indices[torch.randperm(len(semi_hard_indices))[:num_needed]]
+                    selected_indices = torch.cat([semi_hard_indices, padding_indices])
+            else:
+                # If we have more semi-hard negatives than needed, randomly select subset
+                selected_indices = semi_hard_indices[torch.randperm(len(semi_hard_indices))[:len(anchor_feats)]]
+            
+            return negative_feats[selected_indices]
+        else:
+            # If no semi-hard negatives found, return original negatives
+            return negative_feats
+        
+
+
+# Function to compute Precision@k, Recall@k, F1@k
+def compute_top_k_metrics(embeddings, labels, knn_model, k=4):
+    """
+    Compute precision, recall, and F1 at k for KNN embeddings with standard IR definitions.
+    """
+    distances, indices = knn_model.kneighbors(embeddings, n_neighbors=k)
+    training_labels = knn_model._y
+    
+    all_precisions = []
+    all_recalls = []
+    all_f1s = []
+    
+    for i in range(len(embeddings)):
+        true_label = labels[i]
+        neighbor_labels = training_labels[indices[i]]
+        
+        # Count correct predictions among top k
+        correct = np.sum(neighbor_labels == true_label)
+        
+        # Standard precision@k
+        precision = correct / k
+        
+        # Standard binary recall@k (was the relevant item found?)
+        # For classification with 1 correct answer per query, this is the standard definition
+        recall = 1.0 if correct > 0 else 0.0
+        
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        all_precisions.append(precision)
+        all_recalls.append(recall)
+        all_f1s.append(f1)
+    
+    return (
+        np.mean(all_precisions),
+        np.mean(all_recalls),
+        np.mean(all_f1s)
+    )
+def plot_decision_boundaries(ax, embeddings_2d, labels, preds, title):
+    # Define mesh grid boundaries
+    x_min, x_max = embeddings_2d[:, 0].min() - 1, embeddings_2d[:, 0].max() + 1
+    y_min, y_max = embeddings_2d[:, 1].min() - 1, embeddings_2d[:, 1].max() + 1
+    h = 0.2  # Grid step size
+    xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+    
+    # Create KNN classifier on the 2D t-SNE space and predict mesh grid
+    knn = KNeighborsClassifier(n_neighbors=4, metric='euclidean')
+    knn_viz = knn(n_neighbors=4, metric='euclidean')
+    knn_viz.fit(embeddings_2d, labels)
+    Z = knn_viz.predict(np.c_[xx.ravel(), yy.ravel()])
+    Z = Z.reshape(xx.shape)
+    
+    # Plot decision boundaries
+    ax.contourf(xx, yy, Z, alpha=0.2, cmap='viridis')
+    
+    # Plot data points
+    scatter = ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                        c=labels, edgecolors='k', cmap='viridis', s=40, alpha=0.8)
+    
+    # Mark incorrect predictions
+    misclassified = labels != preds
+    ax.scatter(embeddings_2d[misclassified, 0], embeddings_2d[misclassified, 1],
+              marker='x', c='red', s=100, label='Misclassified')
+    
+    ax.set_title(title)
+    return scatter
