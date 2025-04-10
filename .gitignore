@@ -9,6 +9,5 @@ __pycache__/
 *.venv
 results/
 checkpoints/
-*.yaml
 plots/
 3D_plots/
