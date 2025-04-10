@@ -1,18 +1,4 @@
 experiments:
-  multi-prof-base-20-th_02:
-    model: "resnet50-res512-all"
-    model_resolution: 512
-    target: "Profusion"
-    lr: 0.001
-    n_epochs: 20
-    batch_size: 10
-    train_dataset: "MBOD 857"
-    oversampling: false
-    augmentation: false
-    loss_function: "CrossEntropyLoss"
-    binary_thresh: 0.2
-    optimizer: "Adam"
-
   multi-prof-base-20-th_025:
     model: "resnet50-res512-all"
     model_resolution: 512
@@ -39,4 +25,18 @@ experiments:
     augmentation: false
     loss_function: "CrossEntropyLoss"
     binary_thresh: 0.3
+    optimizer: "Adam"
+
+  multi-prof-base-20-th_04:
+    model: "resnet50-res512-all"
+    model_resolution: 512
+    target: "Profusion"
+    lr: 0.001
+    n_epochs: 20
+    batch_size: 10
+    train_dataset: "MBOD 857"
+    oversampling: false
+    augmentation: false
+    loss_function: "CrossEntropyLoss"
+    binary_thresh: 0.4
     optimizer: "Adam"
