@@ -120,8 +120,8 @@ for experiment_name, experiment in config['experiments'].items():
         binary_labels_epoch = []
 
         # For loss tracking
-        epoch_loss_multi = 0.0
-        epoch_loss_binary = 0.0
+        train_loss_multi = 0.0
+        train_loss_binary = 0.0
         train_total = 0
 
         for idx, (img, labels) in enumerate(train_loader):
@@ -161,8 +161,8 @@ for experiment_name, experiment in config['experiments'].items():
             optim.step()
 
             # Track losses
-            epoch_loss_multi += multi_loss.item() * batch_size
-            epoch_loss_binary += binary_loss.item() * batch_size
+            train_loss_multi += multi_loss.item() * batch_size
+            train_loss_binary += binary_loss.item() * batch_size
 
             # Convert predictions and labels to CPU numpy arrays for sklearn
             multi_preds_epoch.extend(m_preds.cpu().numpy())
@@ -182,8 +182,8 @@ for experiment_name, experiment in config['experiments'].items():
             torch.cuda.empty_cache()
 
         # End of epoch: compute average losses
-        avg_loss_multi = epoch_loss_multi / train_total
-        avg_loss_binary = epoch_loss_binary / train_total
+        avg_loss_multi = train_loss_multi / train_total
+        avg_loss_binary = train_loss_binary / train_total
 
         # Compute epoch-level metrics using scikit-learn
         multi_accuracy = accuracy_score(multi_labels_epoch, multi_preds_epoch)
@@ -210,18 +210,18 @@ for experiment_name, experiment in config['experiments'].items():
 
         wandb.log({
             "epoch": epoch + 1,
-            "epoch_loss_multi": avg_loss_multi,
-            "epoch_loss_binary": avg_loss_binary,
-            "epoch_accuracy_multi": multi_accuracy,
-            "epoch_f1_multi": multi_f1,
-            "epoch_precision_multi": multi_precision,
-            "epoch_recall_multi": multi_recall,
-            "epoch_accuracy_binary": binary_accuracy,
-            "epoch_f1_binary": binary_f1,
-            "epoch_precision_binary": binary_precision,
-            "epoch_recall_binary": binary_recall,
-	    "epoch_kappa_binary": binary_kappa,
-	    "epoch_kappa_multi": multi_kappa
+            "train_loss_multi": avg_loss_multi,
+            "train_loss_binary": avg_loss_binary,
+            "train_accuracy_multi": multi_accuracy,
+            "train_f1_multi": multi_f1,
+            "train_precision_multi": multi_precision,
+            "train_recall_multi": multi_recall,
+            "train_accuracy_binary": binary_accuracy,
+            "train_f1_binary": binary_f1,
+            "train_precision_binary": binary_precision,
+            "train_recall_binary": binary_recall,
+            "train_kappa_binary": binary_kappa,
+            "train_kappa_multi": multi_kappa
         })
 
         # Save model checkpoint every 5 epochs
@@ -303,12 +303,18 @@ for experiment_name, experiment in config['experiments'].items():
 
         wandb.log({
             "epoch": epoch + 1,
-            "val_epoch_loss_multi": avg_val_loss_multi,
-            "val_epoch_loss_binary": avg_val_loss_binary,
-            "val_epoch_accuracy_multi": val_multi_accuracy,
-            "val_epoch_f1_multi": val_multi_f1,
-            "val_epoch_accuracy_binary": val_binary_accuracy,
-            "val_epoch_f1_binary": val_binary_f1
+            "val_loss_multi": avg_val_loss_multi,
+            "val_loss_binary": avg_val_loss_binary,
+            "val_accuracy_multi": val_multi_accuracy,
+            "val_f1_multi": val_multi_f1,
+            "val_accuracy_binary": val_binary_accuracy,
+            "val_f1_binary": val_binary_f1,
+            "val_precision_multi": val_multi_precision,
+            "val_recall_multi": val_multi_recall,
+            "val_precision_binary": val_binary_precision,
+            "val_recall_binary": val_binary_recall,
+            "val_kappa_multi": val_multi_kappa,
+            "val_kappa_binary": val_binary_kappa
         })
 
         gc.collect()
