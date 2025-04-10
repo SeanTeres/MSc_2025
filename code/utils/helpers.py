@@ -491,7 +491,7 @@ def plot_combined_conf_mat(predicted_label_name, dataset, predicted_labels, rele
             print(f"Error logging to WandB: {e}")
 
     # Display the plot
-    plt.show()
+    # plt.show()
     
     # Return the confusion matrix for further analysis
     return conf_matrix
