@@ -11,3 +11,4 @@ results/
 checkpoints/
 plots/
 3D_plots/
+*.html
