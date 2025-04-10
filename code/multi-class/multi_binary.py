@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import gc
-
+from sklearn.calibration import calibration_curve
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -113,12 +113,15 @@ for experiment_name, experiment in config['experiments'].items():
         model.train()
 
         # Lists for storing predictions and true labels for the epoch
-        multi_preds_epoch = []
-        multi_labels_epoch = []
+        multi_preds_train = []
+        multi_labels_train = []
+        multi_probs_train = []
 
-        binary_preds_epoch = []
-        binary_labels_epoch = []
 
+        binary_preds_train = []
+        binary_labels_train = []
+        binary_probs_train = []
+        
         # For loss tracking
         train_loss_multi = 0.0
         train_loss_binary = 0.0
@@ -165,12 +168,12 @@ for experiment_name, experiment in config['experiments'].items():
             train_loss_binary += binary_loss.item() * batch_size
 
             # Convert predictions and labels to CPU numpy arrays for sklearn
-            multi_preds_epoch.extend(m_preds.cpu().numpy())
-            multi_labels_epoch.extend(labels.cpu().numpy())
+            multi_preds_train.extend(m_preds.cpu().numpy())
+            multi_labels_train.extend(labels.cpu().numpy())
 
-            binary_preds_epoch.extend(b_preds.cpu().numpy())
+            binary_preds_train.extend(b_preds.cpu().numpy())
             # For binary labels, we need to cast the tensor to long before converting to numpy
-            binary_labels_epoch.extend(binary_labels.long().cpu().numpy())
+            binary_labels_train.extend(binary_labels.long().cpu().numpy())
 
             wandb.log({
                 "batch": idx + 1,
@@ -186,23 +189,23 @@ for experiment_name, experiment in config['experiments'].items():
         avg_loss_binary = train_loss_binary / train_total
 
         # Compute epoch-level metrics using scikit-learn
-        multi_accuracy = accuracy_score(multi_labels_epoch, multi_preds_epoch)
-        multi_f1 = f1_score(multi_labels_epoch, multi_preds_epoch, average='macro')
-        multi_precision = precision_score(multi_labels_epoch, multi_preds_epoch, average='macro')
-        multi_recall = recall_score(multi_labels_epoch, multi_preds_epoch, average='macro')
-        multi_kappa = cohen_kappa_score(multi_labels_epoch, multi_preds_epoch)
+        multi_accuracy = accuracy_score(multi_labels_train, multi_preds_train)
+        multi_f1 = f1_score(multi_labels_train, multi_preds_train, average='macro')
+        multi_precision = precision_score(multi_labels_train, multi_preds_train, average='macro')
+        multi_recall = recall_score(multi_labels_train, multi_preds_train, average='macro')
+        multi_kappa = cohen_kappa_score(multi_labels_train, multi_preds_train)
 
-        binary_accuracy = accuracy_score(binary_labels_epoch, binary_preds_epoch)
-        binary_f1 = f1_score(binary_labels_epoch, binary_preds_epoch)
-        binary_precision = precision_score(binary_labels_epoch, binary_preds_epoch)
-        binary_recall = recall_score(binary_labels_epoch, binary_preds_epoch)
-        binary_kappa = cohen_kappa_score(binary_labels_epoch, binary_preds_epoch)
+        binary_accuracy = accuracy_score(binary_labels_train, binary_preds_train)
+        binary_f1 = f1_score(binary_labels_train, binary_preds_train)
+        binary_precision = precision_score(binary_labels_train, binary_preds_train)
+        binary_recall = recall_score(binary_labels_train, binary_preds_train)
+        binary_kappa = cohen_kappa_score(binary_labels_train, binary_preds_train)
 
 
-        multi_preds_epoch.clear()
-        multi_labels_epoch.clear()
-        binary_preds_epoch.clear()
-        binary_labels_epoch.clear()
+        multi_preds_train.clear()
+        multi_labels_train.clear()
+        binary_preds_train.clear()
+        binary_labels_train.clear()
 
         print(f"Epoch {epoch+1} Summary:")
         print(f"  Multi-class Loss: {avg_loss_multi:.4f} | Accuracy: {multi_accuracy:.4f} | F1: {multi_f1:.4f} | Precision: {multi_precision:.4f} | Recall: {multi_recall:.4f}")
