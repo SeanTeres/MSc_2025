@@ -160,13 +160,13 @@ for experiment_name, experiment in config['experiments'].items():
             # --- Binary predictions ---
             # Create binary labels: class 0 = normal (0), all other classes = abnormal (1)
             # BCEWithLogitsLoss expects float targets
-            binary_labels = (labels != 0).float()  
-            # If probability of class 0 is less than or equal to the threshold, predict abnormal (1), else normal (0)
+            # Keep using output[:, 0] but invert the target meaning
+            binary_labels = (labels == 0).float()  # 1 for normal, 0 for abnormal
             b_preds = (probs[:, 0] <= binary_thresh).long()  
             
             # Calculate losses
             multi_loss = multi_criterion(output, labels)
-            binary_loss = binary_criterion(output[:, 0], binary_labels)
+            binary_loss = binary_criterion(output[:, 0], binary_labels)            # If probability of class 0 is less than or equal to the threshold, predict abnormal (1), else normal (0)
             
             # Backpropagation using the multi-class loss for training purposes
             multi_loss.backward()
