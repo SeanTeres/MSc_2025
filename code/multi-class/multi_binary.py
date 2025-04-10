@@ -95,7 +95,7 @@ for experiment_name, experiment in config['experiments'].items():
     model = xrv.models.ResNet(weights="resnet50-res512-all")
     model.classifier = classes.MultiClassBaseClassifier(in_features=2048, num_classes=4).to(device)
     model = model.to(device)
-    optim = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
 
     if(train_dataset == "MBOD 857"):
@@ -121,7 +121,7 @@ for experiment_name, experiment in config['experiments'].items():
         binary_preds_train = []
         binary_labels_train = []
         binary_probs_train = []
-        
+
         # For loss tracking
         train_loss_multi = 0.0
         train_loss_binary = 0.0
@@ -132,7 +132,7 @@ for experiment_name, experiment in config['experiments'].items():
             if((idx + 1 ) % 5 == 0):
                 print(f"Batch {idx+1}/{len(train_loader)}")
 
-            optim.zero_grad()
+            optimizer.zero_grad()
 
             img = img.to(device)
             labels = labels.to(device)
@@ -161,7 +161,7 @@ for experiment_name, experiment in config['experiments'].items():
             
             # Backpropagation using the multi-class loss for training purposes
             multi_loss.backward()
-            optim.step()
+            optimizer.step()
 
             # Track losses
             train_loss_multi += multi_loss.item() * batch_size
@@ -232,7 +232,7 @@ for experiment_name, experiment in config['experiments'].items():
             checkpoint = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optim.state_dict()
+                'optimizer_state_dict': optimizer.state_dict()
             }
             torch.save(checkpoint, f'C:/Users/user-pc/Masters/MSc_2025/code/multi-class/checkpoints/{experiment_name}_{epoch + 1}.pth')
         
