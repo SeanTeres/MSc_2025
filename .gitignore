@@ -12,3 +12,4 @@ checkpoints/
 plots/
 3D_plots/
 *.html
+*.DS_Store
