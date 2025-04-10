@@ -272,7 +272,7 @@ for experiment_name, experiment in config['experiments'].items():
                 # Multi-class predictions
                 _, m_preds = torch.max(probs, 1)
                 # Binary predictions and labels
-                binary_labels = (labels != 0).float()
+                binary_labels = (labels == 0).float()
                 b_preds = (probs[:, 0] <= binary_thresh).long()
 
                 # Compute losses for validation
@@ -360,7 +360,7 @@ for experiment_name, experiment in config['experiments'].items():
             _, m_preds = torch.max(probs, 1)
             # Binary predictions: use the probability of class 0 and threshold it
             # Here, class 0 is considered "normal" (0), and any probability <= binary_thresh is abnormal (1)
-            binary_labels = (labels != 0).float()  # Convert true labels to binary targets (0 for class 0, 1 otherwise)
+            binary_labels = (labels == 0).float()  # Convert true labels to binary targets (0 for class 0, 1 otherwise)
             b_preds = (probs[:, 0] <= binary_thresh).long()
 
             # Accumulate losses (weighted by batch size)
