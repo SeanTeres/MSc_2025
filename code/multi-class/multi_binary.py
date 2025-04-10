@@ -26,7 +26,16 @@ import torch.optim as optim
 import torch.nn.functional as F
 import gc
 from sklearn.calibration import calibration_curve
+import random
 
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
+set_seed() 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dicom_dir_1 = 'C:/Users/user-pc/Masters/MSc_2025/data/MBOD_Datasets/Dataset-1'
@@ -387,12 +396,17 @@ for experiment_name, experiment in config['experiments'].items():
 
     cm_binary_d2 = confusion_matrix(test_binary_labels, test_binary_preds)
     cm_multi_d2 = confusion_matrix(test_multi_labels, test_multi_preds)
-
-    # converting to binary version for combined confusion matrix
-    d2_cl.metadata_df['Profusion Label'] = (d2_cl.metadata_df['Profusion Label'] > 0).astype(int)
     
-    combined_cm_d2 = helpers.plot_combined_conf_mat('Profusion', d2_cl, test_binary_preds, test_indices_d2, True, "MBOD 857")
+    # Create a deep copy of both the dataset and its metadata DataFrame
+    d2_cl_copy = d2_cl.copy()
+    d2_cl_copy.metadata_df = d2_cl.metadata_df.copy()
 
+    # Now use the copy's own data to create binary labels
+    d2_cl_copy.metadata_df['Profusion Label'] = (d2_cl_copy.metadata_df['Profusion Label'] > 0).astype(int)
+
+    # Use the binary copy for confusion matrix
+    combined_cm_d2 = helpers.plot_combined_conf_mat('Profusion', d2_cl_copy, test_binary_preds, test_indices_d2, True, "MBOD 857")
+    
     # HERE
     # After test phase and logging matrices
     print(f"Binary Classification Confusion Matrix:\n{cm_binary_d2}")
