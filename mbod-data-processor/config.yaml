@@ -1,0 +1,34 @@
+# imgpath is path to root of Silicosis V1 Dataset, and csvpath is the path to the related .csv
+silicosis_857:
+  imgpath: "C:/Users/user-pc/Masters/MSc_2025/data/MBOD_Datasets/Dataset-2" # Path to V1 images
+  csvpath: "C:/Users/user-pc/Masters/MSc_2025/data/MBOD_Datasets/Dataset-2/Database_Training-2024.08.28.csv" # Path to V1 csv
+  delimeter: ","
+  image_id_column: "Anonymized Study Instance UID"
+  radiologist_findings_columns:
+    - "Radiologist: Findings"
+  profusion_score_column: "MBOD Panel: Profusion"
+
+# imgpath is path to root of Silicosis V2 Dataset, and csvpath is the path to the related .csv
+silicosis_1179:
+  imgpath: "C:/Users/user-pc/Masters/MSc_2025/data/MBOD_Datasets/Dataset-1" # Path to V2 images
+  csvpath: "C:/Users/user-pc/Masters/MSc_2025/data/MBOD_Datasets/Dataset-1/CsvFileDatabaseWithRadiology.csv" # Path to V2 csv
+  delimeter: ","
+  image_id_column: "(0020,000d) UI Study Instance UID"
+  profusion_score_column: "Profusion"
+  radiologist_findings_columns:
+    - "strFindingsSimplified1"
+    - "strFindingsSimplified2"
+
+kaggle_TB:
+  path: "" # Path to base directory of the Kaggle dataset
+  outputpath: "kaggle_tb_dataset.h5"
+  image_size: 224
+
+merged_silicosis_output:
+  hdf5_file: "mbod_dataset_merged_512.h5" # Path to read .hdf5 file from
+  image_size: 512 # The size (height,width) the x-rays will be changed to
+
+dataset_check: # Settings for verify and visualise
+  hdf5_file: "mbod_dataset_merged_512.h5"
+  # label_scheme: "tuberculosis" # Label key to use (tuberculosis, silicosis, lab, etc.)
+  label_scheme: "lab" # Label key to use (tuberculosis, silicosis, lab, etc.)

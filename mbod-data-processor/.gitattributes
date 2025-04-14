@@ -1,0 +1,11 @@
+# Ensure all text files use LF
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+
+# Binary files (Git should not modify them)
+*.png binary
+*.jpg binary
+*.exe binary

@@ -13,3 +13,7 @@ plots/
 3D_plots/
 *.html
 *.DS_Store
+*.txt
+*.csv
+*.h5
+datasets/
