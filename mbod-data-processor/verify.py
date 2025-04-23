@@ -1,8 +1,7 @@
 # Verify integrity, count class support
-import matplotlib.pyplot as plt
 import numpy as np
-from datasets.hdf_dataset import HDF5SilicosisDataset
-from utils import LABEL_SCHEMES, load_config
+from datasets.hdf_dataset import HDF5Dataset
+from utils import load_config
 
 
 def visualise(dataset):
@@ -15,36 +14,19 @@ def visualise(dataset):
     print("Dataset Summary:")
     print(dataset)
 
-    label_scheme = dataset.labels_key
-
-    # Check if the label scheme exists in the dataset
-    if label_scheme not in dataset.hdf5_file:
-        print(f"Label scheme '{label_scheme}' not found in the dataset.")
-        return
-
     # Extract the labels for the given label scheme
-    labels = dataset.hdf5_file[label_scheme][:]
-    label_names = dataset.get_label_names()
+    labels = dataset.get_labels()
 
     # Compute support
     if labels.ndim == 1:  # Single-class labels
         unique_labels, support = np.unique(labels, return_counts=True)
-        label_names = [label_names[i] for i in unique_labels]
     elif labels.ndim == 2:  # Multi-class/multi-label
         support = labels.sum(axis=0)
     else:
         print(f"Unsupported label dimensions: {labels.ndim}")
         return
 
-    # Plot support
-    plt.figure(figsize=(12, 6))
-    plt.bar(label_names, support, color="skyblue")
-    plt.xlabel("Labels")
-    plt.ylabel("Support (Number of Samples)")
-    plt.title(f"Support per Class ({label_scheme})")
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
-    plt.savefig("verify.png")
+    print(support)
 
 
 if __name__ == "__main__":
@@ -53,11 +35,11 @@ if __name__ == "__main__":
         dataset_path = config["dataset_check"]["hdf5_file"]
         chosen_label_scheme = config["dataset_check"]["label_scheme"]
 
-        dataset = HDF5SilicosisDataset(
-            hdf5_file_path=dataset_path,
+        dataset = HDF5Dataset(
+            hdf5_path=dataset_path,
             labels_key=chosen_label_scheme,
-            image_key="images",
-            label_metadata=LABEL_SCHEMES,
+            images_key="images",
+            preprocess=None
         )
 
         visualise(dataset=dataset)

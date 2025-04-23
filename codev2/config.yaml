@@ -29,37 +29,37 @@ ilo_refs:
   radiologist_findings_columns: []
 
 kaggle_TB:
-  path: "/home/sean/MSc_2025/data/TB_Chest_Radiography_Database" # Path to base directory of the Kaggle dataset
-  outputpath: "kaggle_tb_dataset.h5"
+  path: "" # Path to base directory of the Kaggle dataset
+  outputpath: "/home/sean/MSc_2025/mbod-data-processor/kaggle_tb_dataset.h5"
   image_size: 512
 
 merged_silicosis_output:
-  hdf5_file: "mbod_dataset_merged_512.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/mbod_dataset_merged_512.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
 
 mbod_857_silicosis_output:
-  hdf5_file: "mbod_857_512.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/mbod_857_512.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
 
 mbod_1179_silicosis_output:
-  hdf5_file: "mbod_1179_512.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/mbod_1179_512.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
 
 ilo_output:
-  hdf5_file: "ilo_dataset_512.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/ilo_dataset_512.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
 
 sz_output:
-  hdf5_file: "sz_kaggle_dataset.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/sz_kaggle_dataset.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
   
 mc_output:
-  hdf5_file: "mc_kaggle_dataset.h5" # Path to read .hdf5 file from
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/mc_kaggle_dataset.h5" # Path to read .hdf5 file from
   image_size: 512 # The size (height,width) the x-rays will be changed to
 
 
 dataset_check: # Settings for verify and visualise
-  hdf5_file: "mbod_dataset_merged_512.h5"
+  hdf5_file: "/home/sean/MSc_2025/mbod-data-processor/mbod_dataset_merged_512.h5"
   # label_scheme: "tuberculosis" # Label key to use (tuberculosis, silicosis, lab, etc.)
   label_scheme: "profusion_score" # Label key to use (tuberculosis, silicosis, lab, etc.)
 

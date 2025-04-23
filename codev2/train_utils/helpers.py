@@ -85,7 +85,6 @@ def compute_pairwise_distances(embeddings, metric='cosine'):
 
     return dist_matrix
 
-def select_all_negative_samples(img, lab):
     """
     For each image in the batch, select all non-matching samples (images with a different label).
     
@@ -151,3 +150,48 @@ def compute_map_per_class(embeddings, labels):
 
     overall_map = np.mean(list(class_map.values()))
     return overall_map, class_map
+
+# After initializing your dataset and before creating the model
+def calculate_class_weights(train_loader, num_classes=4, dampening_factor=0.5):
+    """
+    Calculate class weights for light oversampling.
+    
+    Args:
+        train_loader: DataLoader for training data
+        num_classes: Number of classes in the dataset
+        dampening_factor: Controls the strength of oversampling (0-1)
+                          0 = equal weights, 1 = fully inverse weights
+    
+    Returns:
+        torch.Tensor: Tensor of class weights
+    """
+    # Count instances of each class
+    class_counts = torch.zeros(num_classes)
+    
+    print("Counting class distribution...")
+    for batch in train_loader:
+        labels = batch[1]
+        for i in range(num_classes):
+            class_counts[i] += (labels == i).sum().item()
+    
+    total_samples = class_counts.sum().item()
+    class_frequencies = class_counts / total_samples
+    
+    # Calculate weights (inversely proportional to frequency)
+    raw_weights = 1.0 / class_frequencies
+    
+    # Normalize weights to sum to num_classes
+    normalized_weights = raw_weights * (num_classes / raw_weights.sum())
+    
+    # Apply dampening factor for lighter oversampling
+    dampened_weights = 1.0 + dampening_factor * (normalized_weights - 1.0)
+    
+    print("Class distribution:")
+    for i in range(num_classes):
+        print(f"Class {i}: {class_counts[i]} samples ({class_frequencies[i]:.2%})")
+    
+    print("\nCalculated weights:")
+    for i in range(num_classes):
+        print(f"Class {i}: raw={raw_weights[i]:.4f}, dampened={dampened_weights[i]:.4f}")
+    
+    return dampened_weights

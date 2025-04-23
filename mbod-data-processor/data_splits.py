@@ -1,10 +1,17 @@
 import numpy as np
-from datasets.hdf_dataset import HDF5SilicosisDataset
+import json
+from datasets.hdf_dataset import HDF5Dataset
 from utils import LABEL_SCHEMES, load_config
 
 
+def save_split_indices(indices, file_path):
+    """Save split indices to a JSON file."""
+    with open(file_path, 'w') as f:
+        json.dump(indices, f)
+
+
 def get_label_scheme_supports(dataset, label_scheme):
-    labels = dataset.hdf5_file[label_scheme][:]
+    labels = dataset.get_labels(label_scheme)
 
     return np.array(labels)
 
@@ -52,8 +59,6 @@ def iter_strat(indexes, labels, split_size):
             desired_split = desired_split - viable_label
             final_support_split += viable_label
             assigned[first_viable] = True
-
-    print(final_support_split)
 
     return created_split
 
@@ -114,27 +119,37 @@ def stratify(dataset):
 
     print(np.sum(train_labels, axis=0))
 
-    # print("================")
-    # print(train_split)
-    # print("================")
-    # print(val_split)
-    # print("================")
-    # print(test_split)
+    print("================")
+    print(train_split)
+    print("================")
+    print(val_split)
+    print("================")
+    print(test_split)
 
-    return train_split, val_split, test_split
+    train_split = [int(x) for x in train_split]
+    val_split = [int(x) for x in val_split]
+    test_split = [int(x) for x in test_split]
+
+    save_split_indices(
+        {"train": train_split,
+         "val": val_split,
+         "test": test_split},
+        "stratified_split.json",
+    )
 
 
 if __name__ == "__main__":
+    np.random.seed(42)
     config = load_config()
     try:
         dataset_path = config["dataset_check"]["hdf5_file"]
         chosen_label_scheme = config["dataset_check"]["label_scheme"]
 
-        dataset = HDF5SilicosisDataset(
-            hdf5_file_path=dataset_path,
+        dataset = HDF5Dataset(
+            hdf5_path=dataset_path,
             labels_key=chosen_label_scheme,
-            image_key="images",
-            label_metadata=LABEL_SCHEMES,
+            images_key="images",
+            preprocess=None
         )
 
         stratify(dataset=dataset)
@@ -143,4 +158,3 @@ if __name__ == "__main__":
         print(f"Missing configuration: {e}")
     except FileNotFoundError as e:
         print(f"Dataset file not found: {e}")
-        

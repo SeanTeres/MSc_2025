@@ -11,7 +11,7 @@ if __name__ == "__main__":
     image_size = config["merged_silicosis_output"]["image_size"]
 
     try:
-        d_silicosis_857 = MBODSilicosisDataset(
+        d_silicosis_v1 = MBODSilicosisDataset(
             imgpath=config["silicosis_857"]["imgpath"],
             csvpath=config["silicosis_857"]["csvpath"],
             delimeter=config["silicosis_857"]["delimeter"],
@@ -21,13 +21,12 @@ if __name__ == "__main__":
             ],
             profusion_score_column=config["silicosis_857"]["profusion_score_column"],
         )
-        d_silicosis_1179 = MBODSilicosisDataset(
+        d_silicosis_v2 = MBODSilicosisDataset(
             imgpath=config["silicosis_1179"]["imgpath"],
             csvpath=config["silicosis_1179"]["csvpath"],
         )
 
-        d_silicosis_merge = MergeDataset([d_silicosis_857, d_silicosis_1179])
-        # d_silicosis_merge = d_silicosis_v2
+        d_silicosis_merge = MergeDataset([d_silicosis_v1, d_silicosis_v2])
 
         # Define the structure of the HDF5 dataset
         num_samples = len(d_silicosis_merge)
@@ -56,6 +55,20 @@ if __name__ == "__main__":
             dataset=d_silicosis_merge,
             hdf5_structure=hdf5_structure,
             filename=config["merged_silicosis_output"]["hdf5_file"],
+            xrayresizer=xrayresizer,
+        )
+
+        save_to_h5py(
+            dataset=d_silicosis_v1,
+            hdf5_structure=hdf5_structure,
+            filename=config["mbod_857_silicosis_output"]["hdf5_file"],
+            xrayresizer=xrayresizer,
+        )
+
+        save_to_h5py(
+            dataset=d_silicosis_v2,
+            hdf5_structure=hdf5_structure,
+            filename=config["mbod_1179_silicosis_output"]["hdf5_file"],
             xrayresizer=xrayresizer,
         )
     except KeyError as e:

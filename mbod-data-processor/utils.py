@@ -48,6 +48,12 @@ LABEL_SCHEMES = {
         "Unhealthy Non-Tuberculosis",
         "Healthy/No findings",
     ],
+    "profusion_score": [
+        "0",
+        "1",
+        "2",
+        "3"
+    ],
 }
 
 
