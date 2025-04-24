@@ -25,32 +25,6 @@ import torchvision.transforms as transforms
 import os
 from tsne import visualize_tsne
 
-def calculate_margin_violations(anchor_embedding, positive_embedding, negative_embedding, margin):
-    """
-    Calculate if a triplet violates the margin constraint.
-    
-    A triplet (A,P,N) violates the margin if:
-    d(A,P) > d(A,N) - margin
-    
-    Args:
-        anchor_embedding: Embedding of the anchor sample
-        positive_embedding: Embedding of the positive sample
-        negative_embedding: Embedding of the negative sample
-        margin: The margin value to enforce
-        
-    Returns:
-        is_violated: Boolean indicating if the margin is violated
-        violation_amount: How much the constraint is violated by (if positive)
-    """
-    # Calculate distances
-    dist_ap = F.pairwise_distance(anchor_embedding, positive_embedding)
-    dist_an = F.pairwise_distance(anchor_embedding, negative_embedding)
-    
-    # Check violation
-    violation_amount = dist_ap - (dist_an - margin)
-    is_violated = violation_amount > 0
-    
-    return is_violated.item(), violation_amount.item()
 
 def train_model(
     model,
@@ -127,7 +101,6 @@ def train_model(
         'train_class_map': [],
         'val_class_map': []
     }
-
     
     for epoch in range(n_epochs):
         print(f"Epoch {epoch + 1}/{n_epochs}")
@@ -144,8 +117,7 @@ def train_model(
         
         running_loss = 0.0
         running_loss = 0.0
-        epoch_margin_violations = []
-
+        
         all_embeddings = []
         all_labels = []
         
@@ -240,10 +212,6 @@ def train_model(
                             print(f"Sample {i}: A-P distance: {positive_distance.item():.4f}")
                             print(f"Sample {i}: A-N distances: min={dists.min().item():.4f}, max={dists.max().item():.4f}, mean={dists.mean().item():.4f}")
                         
-                        if wandb.config.margin_scheduling:
-                            current_margin = current_margin
-                        else:
-                            current_margin = wandb.config.initial_margin
                         
                         # Try increasingly relaxed criteria:
                         # 1. First attempt: strict semi-hard negatives (original condition)
@@ -310,21 +278,11 @@ def train_model(
                 all_losses.append(loss)
                 batch_triplet_loss += loss.item()
                 n_triplets += 1
-
-                # Add violation tracking
-                is_violated, violation_amount = calculate_margin_violations(
-                    anchor_embedding, 
-                    positive_embedding, 
-                    negative_embedding, 
-                    triplet_loss_fn.margin
-                )
-                epoch_margin_violations.append(is_violated)
-
                 
-                # For the first batch in each epoch, log some examples
                 if batch_idx == 0 and i == 0:
                     print(f"A: {anchor_label}, P: {positive_label}, N: {negative_label}")
-                    print(f"Loss: {loss.item():.4f}, Margin Violated: {is_violated}, Violation Amount: {violation_amount:.4f}")
+                    print(f"Loss: {loss.item():.4f}")
+                    # print(f"Candidate negatives: {len(dists)}, mining: {wandb.config.mining}")
             
             if n_triplets > 0:
                 # Average the losses and backprop
@@ -359,24 +317,6 @@ def train_model(
         print("- Per-Class Train mAP:")
         for class_id, ap in train_class_map.items():
             print(f"  Class {class_id}: mAP = {ap:.4f}")
-
-        # Calculate margin violation rate for this epoch
-        if epoch_margin_violations:
-            violation_rate = sum(epoch_margin_violations) / len(epoch_margin_violations)
-            print(f"Margin violation rate: {violation_rate:.4f} ({sum(epoch_margin_violations)}/{len(epoch_margin_violations)})")
-        else:
-            violation_rate = 0.0
-            print("No triplets were formed to check for margin violations")
-
-        # Reset violation tracking for next epoch
-        epoch_margin_violations = []
-
-        # Log to WandB
-        if log_to_wandb:
-            wandb.log({
-                "margin_violation_rate": violation_rate,
-                "epoch": epoch + 1
-            })
         
         # Run t-SNE visualization at regular intervals
         if (epoch + 1) % tsne_interval == 0:
@@ -472,7 +412,6 @@ def validate(model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels)
     running_loss = 0.0
     all_embeddings = []
     all_labels = []
-    val_margin_violations = []
     
     print("Running validation loop...")
     batch_with_triplets = 0  # Count of batches with valid triplets
@@ -525,20 +464,10 @@ def validate(model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels)
                     print(f"No negative sample found for label {positive_label}. Skipping.")
                     continue
 
-
-
+                # Compute triplet loss
                 loss = triplet_loss_fn(anchor_embedding, positive_embedding, negative_embedding)
                 batch_triplet_loss += loss.item()
                 n_triplets += 1
-
-                # Track margin violations
-                is_violated, _ = calculate_margin_violations(
-                    anchor_embedding, 
-                    positive_embedding, 
-                    negative_embedding, 
-                    triplet_loss_fn.margin
-                )
-                val_margin_violations.append(is_violated)
 
                 # Log triplet details for the first batch
                 if batch_idx == 0 and i == 0:
@@ -573,23 +502,12 @@ def validate(model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels)
         for class_id, ap in val_class_map.items():
             print(f"  Class {class_id}: mAP = {ap:.4f}")
         
-        # Calculate validation margin violation rate
-        if val_margin_violations:
-            val_violation_rate = sum(val_margin_violations) / len(val_margin_violations)
-            print(f"- Validation margin violation rate: {val_violation_rate:.4f} ({sum(val_margin_violations)}/{len(val_margin_violations)})")
-        else:
-            val_violation_rate = 0.0
-            
-        wandb.log({
-            "val_margin_violation_rate": val_violation_rate
-        })
-
-        return val_loss, val_map, val_class_map, all_embeddings, all_labels, val_violation_rate
+        return val_loss, val_map, val_class_map, all_embeddings, all_labels
     
     return 0.0, 0.0, {}, None, None
 
 if __name__ == "__main__":
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
     print(f"Using device: {device}")
     print("*" * 50)
@@ -630,18 +548,18 @@ if __name__ == "__main__":
 
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl', name='BSHN-OS_aug-m_04',
+        wandb.init(project='MBOD-cl', name='BSHN-OS-m_03_05',
             config={
                 "batch_size": 16,
                 "n_epochs": 250,
                 "learning_rate": 1e-4,
                 "oversample": True,
-                "initial_margin": 0.4,      
-                "final_margin": 0.6,        
-                "margin_scheduling": False,   # Enable margin scheduling
+                "initial_margin": 0.3,      
+                "final_margin": 0.5,        
+                "margin_scheduling": True,   # Enable margin scheduling
                 "scheduling_fraction": 0.9,  # Complete scheduling in first x% of training
                 "mining": "BSHN",
-                "augmentations": True
+                "augmentations": False
             })
 
         experiment_name = wandb.run.name

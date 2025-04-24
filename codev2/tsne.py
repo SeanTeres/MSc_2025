@@ -18,7 +18,7 @@ import os
 from sklearn.manifold import TSNE
 import matplotlib.cm as cm
 
-def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_to_wandb=False, n_epochs=0, set_name="Training"):
+def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_to_wandb=False, n_epochs=0, set_name="Training", entire_dataset=False):
     """
     Generate t-SNE visualization for comparing embeddings from ILO and MBOD datasets
     
@@ -156,7 +156,12 @@ def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_t
                 linewidths=0.2
             )
     
-    plt.title(f"t-SNE Visualization {'(Trained Model)' if trained else '(Untrained Model)'}\nEpoch {n_epochs}", fontsize=16)
+    if entire_dataset:
+        title_to_add = "Entire Dataset"
+    else:
+        title_to_add = ""
+
+    plt.title(f"t-SNE Visualization {'(Trained Model)' if trained else '(Untrained Model)'}\n{title_to_add} - Epoch {n_epochs}", fontsize=16)
     plt.xlabel("t-SNE Component 1", fontsize=14)
     plt.ylabel("t-SNE Component 2", fontsize=14)
     plt.grid(True, alpha=0.3)
