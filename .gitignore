@@ -17,3 +17,6 @@ plots/
 *.csv
 *.h5
 datasets/
+code/
+plots/
+mbod-data-processor/
