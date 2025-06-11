@@ -648,9 +648,9 @@ def train_model_mstb(
         # Run t-SNE visualization at regular intervals
         if (epoch + 1) % tsne_interval == 0:
             visualize_tsne(model, device, ilo_dataset, train_loader, 
-                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="training", entire_dataset=False, color_by_profusion=True)
+                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="training", entire_dataset=False)
             visualize_tsne(model, device, ilo_dataset, val_loader, 
-                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="validation", entire_dataset=False, color_by_profusion=True)
+                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="validation", entire_dataset=False)
         
         # Run validation
         print("\nVALIDATION\n")
@@ -1084,7 +1084,7 @@ if __name__ == "__main__":
         )
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl', name='mstb_v2-sin_m_005_05',
+        wandb.init(project='MBOD-cl', name='mstb_v2-sin_m_005_05-OS_85',
             config={
                 "experiment_type": "CL",
                 "batch_size": 32,
@@ -1101,7 +1101,7 @@ if __name__ == "__main__":
                 "loss_function": "Triplet",
                 "p_ilo_anchor": 0.0,
                 "num_classes": 8,  # Explicitly specify 8 classes
-                "OS_factor": 0.65,  # Oversampling factor
+                "OS_factor": 0.85,  # Oversampling factor
             })
 
         experiment_name = wandb.run.name
@@ -1214,8 +1214,8 @@ if __name__ == "__main__":
         print(f"ILO images loaded onto GPU: {ilo_images.shape}")
         print(f"ILO labels loaded onto GPU: {ilo_labels.shape}")
 
-        visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=True, is_mstb=True)
-        visualize_tsne(model, device, ilo_dataset, train_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=False, is_mstb=True)
+        visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=True, is_mstb=False)
+        visualize_tsne(model, device, ilo_dataset, train_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=False, is_mstb=False)
 
 
         # results = train_triplet_model(
