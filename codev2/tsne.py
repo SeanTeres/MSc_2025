@@ -213,7 +213,7 @@ def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_t
         # MBOD points for this class (circle for TB-, triangle for TB+)
         idx_mbod = np.where(mbod_labels_subset == label)[0]
 
-        if is_mstb:
+        if not is_mstb:
             if len(idx_mbod) > 0:
                 plt.scatter(
                     mbod_coords[idx_mbod, 0], 
@@ -232,7 +232,7 @@ def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_t
                     mbod_coords[idx_mbod, 0], 
                     mbod_coords[idx_mbod, 1],
                     c=color,  # Use consistent color for profusion score
-                    marker='o',  # Circle 
+                    marker='p',  # Pentagon when we do not differentiate TB status 
                     s=40, 
                     label=f'MBOD - Profusion {prof_score}',
                     alpha=0.6,
