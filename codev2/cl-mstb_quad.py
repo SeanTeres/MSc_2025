@@ -1,6 +1,6 @@
 import sys
 import os
-
+import gc
 # Add mbod-data-processor to the Python path
 sys.path.append(os.path.abspath("../mbod-data-processor"))
 
@@ -31,7 +31,166 @@ from pytorch_metric_learning.reducers import ThresholdReducer
 from pytorch_metric_learning.regularizers import LpRegularizer
 from pytorch_metric_learning import losses, miners
 
+import torch
+from torch import nn, Tensor
+import torch.nn.functional as F
 
+
+def print_dataloader_label_distribution(dataloader, label_mapping=None, wrapped=False):
+    """
+    Print the distribution of labels in a dataloader
+    
+    Args:
+        dataloader: PyTorch dataloader
+        label_mapping: Optional dict mapping label indices to human-readable names
+    """
+    label_counts = {}
+    
+    # Collect all labels
+    if not wrapped:
+        all_labels = []
+        for _, labels in dataloader:
+            if isinstance(labels, torch.Tensor):
+                batch_labels = labels.cpu().numpy()
+            else:
+                batch_labels = np.array(labels)
+                
+            if len(batch_labels.shape) > 1:
+                # For multi-label case, take argmax
+                batch_labels = np.argmax(batch_labels, axis=1)
+                
+            all_labels.extend(batch_labels)
+        
+        # Count occurrences
+        unique_labels, counts = np.unique(all_labels, return_counts=True)
+        
+        # Print distribution
+        total_samples = len(all_labels)
+        print(f"Total samples: {total_samples}")
+        print("Label distribution:")
+        
+        for label, count in zip(unique_labels, counts):
+            percentage = (count / total_samples) * 100
+            if label_mapping and label in label_mapping:
+                label_name = f"{label} ({label_mapping[label]})"
+            else:
+                label_name = str(label)
+            
+            print(f"  {label_name}: {count} samples ({percentage:.2f}%)")
+    else:
+        all_labels = []
+        for _, labels in dataloader:
+            if isinstance(labels, torch.Tensor):
+                batch_labels = labels.cpu().numpy()
+            else:
+                batch_labels = np.array(labels)
+                
+            if len(batch_labels.shape) > 1:
+                # For multi-label case, take argmax
+                batch_labels = np.argmax(batch_labels, axis=1)
+                
+            all_labels.extend(batch_labels)
+        
+        # Count occurrences
+        unique_labels, counts = np.unique(all_labels, return_counts=True)
+        
+        # Print distribution
+        total_samples = len(all_labels)
+        print(f"Total samples: {total_samples}")
+        print("Label distribution:")
+        
+        for label, count in zip(unique_labels, counts):
+            percentage = (count / total_samples) * 100
+            if label_mapping and label in label_mapping:
+                label_name = f"{label} ({label_mapping[label]})"
+            else:
+                label_name = str(label)
+            
+            print(f"  {label_name}: {count} samples ({percentage:.2f}%)")
+
+
+class QuadrupletMarginLoss(nn.modules.loss._Loss):
+    __constants__ = ['margin1', 'margin2', 'p', 'eps', 'swap', 'reduction']
+    margin1: float
+    margin2: float
+    p: float
+    eps: float
+    swap: bool
+
+    def __init__(self,
+                 margin1: float = 1.0,
+                 margin2: float = 1.0,
+                 p: float = 2.,
+                 eps: float = 1e-6,
+                 swap: bool = False,
+                 type: str = 'anchor-push',  # 'anchor-push' or 'structured'
+                 size_average=None,
+                 reduce=None,
+                 reduction: str = 'mean'):
+        super().__init__(size_average, reduce, reduction)
+        self.margin1 = margin1
+        self.margin2 = margin2
+        self.p = p
+        self.eps = eps
+        self.swap = swap
+        self.reduction = reduction
+        assert type in ['anchor-push', 'structured', 'TieredNegativeRanking', 'RelativeNegativeRanking']
+        self.type = type
+
+    def forward(self, anchor: Tensor, positive: Tensor, negative1: Tensor, negative2: Tensor) -> Tensor:
+        
+        d_ap = torch.norm(anchor - positive, p=self.p, dim=1)
+        d_an1 = torch.norm(anchor - negative1, p=self.p, dim=1)
+        d_an2 = torch.norm(anchor - negative2, p=self.p, dim=1)
+        d_n1n2 = torch.norm(negative1 - negative2, p=self.p, dim=1)
+        
+        # First term: standard triplet
+        loss1 = F.triplet_margin_loss(anchor, positive, negative1,
+                                      margin=self.margin1,
+                                      p=self.p,
+                                      eps=self.eps,
+                                      swap=self.swap,
+                                      reduction='none')
+
+        if self.type == 'anchor-push':
+            # Second term: second negative pushed from anchor
+            loss2 = F.triplet_margin_loss(anchor, positive, negative2,
+                                          margin=self.margin2,
+                                          p=self.p,
+                                          eps=self.eps,
+                                          swap=self.swap,
+                                          reduction='none')
+        elif self.type == 'structured':
+            # Second term: negative2 pushed from negative1
+            # Use D(N1, N2) instead of D(A, N2)
+            d_ap = torch.norm(anchor - positive, p=self.p, dim=1)
+            d_n1n2 = torch.norm(negative1 - negative2, p=self.p, dim=1)
+            loss2 = torch.clamp(d_ap - d_n1n2 + self.margin2, min=0.0)
+
+        elif self.type == 'TieredNegativeRanking':
+        # First term: standard triplet loss (anchor-positive vs anchor-negative1)
+            loss1 = torch.clamp(d_ap - d_an1 + self.margin1, min=0.0)
+            
+            # Second term: negative2 vs negative1 from anchor perspective
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)
+        
+            
+        elif self.type == 'RelativeNegativeRanking':
+        # First term: standard triplet loss (anchor-positive vs anchor-negative1)
+            loss1 = torch.clamp(d_ap - d_an2 + self.margin1, min=0.0)
+            
+            # Second term: negative2 vs negative1 from anchor perspective
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)    
+
+        # Combine terms and apply reduction
+        loss = loss1 + loss2
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
 
 def build_profusion_tb_map(dataset):
     """
@@ -153,14 +312,12 @@ def calculate_margin_violations(anchor_embedding, positive_embedding, negative_e
 
 
 
-def train_model_mstb(
+def train_model_quadruplet(
     model,
     train_loader,
     val_loader,
-    ilo_dataset,
-    ilo_images,
-    ilo_labels,
     triplet_loss_fn,
+    quadruplet_loss_fn,
     optimizer,
     device,
     n_epochs,
@@ -168,25 +325,23 @@ def train_model_mstb(
     checkpoint_dir="checkpoints",
     tsne_interval=50,
     log_to_wandb=True,
-    mining_strat="Random",  # Mining strategy for triplet loss
-    margin_scheduling=False,  # Enable/disable margin scheduling
-    initial_margin=0.8,       # Initial larger margin
-    final_margin=0.2,         # Final smaller margin
-    scheduling_fraction=0.8,   # Fraction of training to complete schedule
-    p_ilo_anchor=0.5          # Probability of using ILO image as anchor (vs in-batch)
-
+    mining_strat="BSHN-v2",
+    margin_scheduling=False,
+    initial_margin=0.8,
+    final_margin=0.2,
+    scheduling_fraction=0.8,
+    p_ilo_anchor=0.5
 ):
     """
-    Trains a model using contrastive learning with triplet loss.
+    Trains a model using quadruplet loss for multi-label tasks like 
+    simultaneous pneumoconiosis and TB classification.
     
     Args:
         model: PyTorch model to train
         train_loader: DataLoader for training data
         val_loader: DataLoader for validation data
-        ilo_dataset: Dataset containing ILO standard images
-        ilo_images: Preloaded ILO images on device
-        ilo_labels: Preloaded ILO labels on device
-        triplet_loss_fn: Loss function for triplet loss
+        triplet_loss_fn: Standard triplet loss function for comparison
+        quadruplet_loss_fn: Quadruplet loss function
         optimizer: Optimizer for model parameter updates
         device: Device to run training on (cuda/cpu)
         n_epochs: Number of training epochs
@@ -194,99 +349,68 @@ def train_model_mstb(
         checkpoint_dir: Directory to save checkpoints
         tsne_interval: How often to run t-SNE visualization
         log_to_wandb: Whether to log metrics to wandb
-        experiment_name: Name of the experiment for wandb logging
-        p_ilo_anchor: Probability (0-1) of using ILO image as anchor vs in-batch sample
+        mining_strat: Mining strategy for finding negatives
+        margin_scheduling: Enable/disable margin scheduling
+        initial_margin: Initial margin value
+        final_margin: Final margin value
+        scheduling_fraction: Fraction of training to complete schedule
         
     Returns:
-        dict: Dictionary containing trained model, best model state dict, 
+        dict: Dictionary containing trained model, best model state dict,
               training history and best validation metrics
     """
-
-    # Define the mapping for multiclass_stb (TB and Silicosis combined classification)
+    # Define the mapping for multiclass_stb
     multiclass_stb_mapping = {
-            0: "Profusion 0, No TB",
-            1: "Profusion 1, No TB",
-            2: "Profusion 2, No TB",
-            3: "Profusion 3, No TB",
-            4: "Profusion 0, With TB",
-            5: "Profusion 1, With TB",
-            6: "Profusion 2, With TB",
-            7: "Profusion 3, With TB",
+        0: "Profusion 0, No TB",
+        1: "Profusion 1, No TB",
+        2: "Profusion 2, No TB",
+        3: "Profusion 3, No TB",
+        4: "Profusion 0, With TB",
+        5: "Profusion 1, With TB",
+        6: "Profusion 2, With TB",
+        7: "Profusion 3, With TB",
     }
 
+    # Create label-to-indices map for finding appropriate anchors
     labels_to_indices = build_label_to_indices_map(train_loader.dataset.dataset)
     prof_tb_labels = build_profusion_tb_map(train_loader.dataset.dataset)
 
-    if(initial_margin > final_margin):  # Change condition to check initial > final
-
-        def get_linear_scheduled_margin(current_epoch):
-            """Calculate margin based on current training progress using a linear function"""
-            if not margin_scheduling:
-                return triplet_loss_fn.margin  # Return the original margin
-            
-            # Calculate how far we are through the scheduled part of training
-            schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
-            
-            # Linearly interpolate between initial and final margin
-            current_margin = initial_margin - (initial_margin - final_margin) * schedule_point
-            return current_margin
+    # Margin scheduling functions
+    def get_sin_scheduled_margin(current_epoch):
+        if not margin_scheduling:
+            return triplet_loss_fn.margin
         
-        def get_sin_scheduled_margin(current_epoch):
-            """Calculate margin based on current training progress using a sinusoidal function"""
-            if not margin_scheduling:
-                return triplet_loss_fn.margin  # Return the original margin
-            
-            # Calculate how far we are through the scheduled part of training
-            schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
-            
-            # Use a sin function that starts at 0 and ends at π/2
-            # sin(0) = 0 and sin(π/2) = 1
-            sin_factor = math.sin(schedule_point * math.pi/2)
-            
-            # Interpolate between initial and final margin using the sin factor
-            current_margin = initial_margin - (final_margin - initial_margin) * sin_factor
-            return current_margin
-
-    else:
-        def get_sin_scheduled_margin(current_epoch):
-            """Calculate margin based on current training progress using a sinusoidal function"""
-            if not margin_scheduling:
-                return triplet_loss_fn.margin  # Return the original margin
-            
-            # Calculate how far we are through the scheduled part of training
-            schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
-            
-            # Use a sin function that starts at 0 and ends at π/2
-            # sin(0) = 0 and sin(π/2) = 1
-            sin_factor = math.sin(schedule_point * math.pi/2)
-            
-            # Interpolate between initial and final margin using the sin factor
+        schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
+        sin_factor = math.sin(schedule_point * math.pi/2)
+        
+        if initial_margin > final_margin:
+            current_margin = initial_margin - (initial_margin - final_margin) * sin_factor
+        else:
             current_margin = initial_margin + (final_margin - initial_margin) * sin_factor
-            return current_margin
-        
-        def get_linear_scheduled_margin(current_epoch):
-            """Calculate margin based on current training progress using a linear function"""
-            if not margin_scheduling:
-                return triplet_loss_fn.margin  # Return the original margin
             
-            # Calculate how far we are through the scheduled part of training
-            schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
-            
-            # Linearly interpolate between initial and final margin
-            current_margin = initial_margin + (initial_margin - final_margin) * schedule_point
-            return current_margin
+        return current_margin
     
-    # Ensure we're tracking metrics for all 8 classes
-    num_classes = 8
-    
+    def get_scheduled_p_ilo(current_epoch, initial_p_ilo_anchor, n_epochs, scheduling_fraction):
+        """
+        Calculate the scheduled probability of using ILO anchors.
+        Starts at initial_p_ilo_anchor and decays to p_ilo_final over the first 
+        scheduling_fraction portion of training.
+        """
+        # Calculate what fraction of the scheduling period we've completed
+        schedule_end_epoch = n_epochs * scheduling_fraction
+        schedule_point = min(1.0, current_epoch / schedule_end_epoch)
+        sin_factor = math.sin(schedule_point * math.pi/2)
+
+        # Calculate new probability
+        new_p_ilo_anchor = initial_p_ilo_anchor - (initial_p_ilo_anchor - wandb.config.p_ilo_final) * sin_factor
+        return new_p_ilo_anchor
+
+    # Create checkpoint directory
     checkpoint_dir = os.path.join(checkpoint_dir, experiment_name)
-    # Create checkpoint directory if it doesn't exist
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    
-    model.train()
-    
     # Tracking metrics
+    num_classes = 8  # For multiclass_stb
     best_val_map = 0.0
     best_model_state = None
     history = {
@@ -298,453 +422,376 @@ def train_model_mstb(
         'val_class_map': [],
         'train_prof_map': [],
         'val_prof_map': [],
+        'train_quadruplet_loss': [],
+        'val_quadruplet_loss': [],
+        'train_sensitivity': [],  # Add these new keys
+        'val_sensitivity': [],
+        'train_class_sensitivity': [],
+        'val_class_sensitivity': []
     }
     
-    # Initialize class-specific metrics for all 8 classes
+    # Initialize class-specific metrics
     per_class_metrics = {class_id: {'train_ap': [], 'val_ap': []} for class_id in range(num_classes)}
+
+    print("\n")
+    print("***"*50)
+    print("\n")
+
+    print_dataloader_label_distribution(train_loader, label_mapping=multiclass_stb_mapping)
+
+    print("\n")
+    print("***"*50)
+    print("\n")
 
     for epoch in range(n_epochs):
         print(f"Epoch {epoch + 1}/{n_epochs}")
         print("=" * 50)
 
-         # Apply margin scheduling if enabled
+        # Apply margin scheduling if enabled
         if margin_scheduling:
             current_margin = get_sin_scheduled_margin(epoch)
             triplet_loss_fn.margin = current_margin
-            print(f"Current margin: {current_margin:.4f}")
+            quadruplet_loss_fn.margin1 = current_margin
+            quadruplet_loss_fn.margin2 = current_margin * 0.25
+            print(f"Current margins: {current_margin:.4f}, {quadruplet_loss_fn.margin2:.4f}")
+
+        if(wandb.config.p_ilo_scheduling):
+            p_ilo_anchor = get_scheduled_p_ilo(epoch, wandb.config.p_ilo_anchor, n_epochs, wandb.config.scheduling_fraction)
         
+        model.train()
         epoch_total_loss = 0.0
         epoch_batch_count = 0
-        epoch_margin_violations = []
+        epoch_quadruplet_count = 0
 
         all_embeddings = []
         all_labels = []
         
         # Training loop
         for batch_idx, sample in enumerate(train_loader):
-            # Zero gradients once at the start of each batch
+            # Zero gradients for this batch
             optimizer.zero_grad()
             
-            imgs = sample[0]
-            labels = sample[1]
-            imgs = imgs.to(device)
-            labels = labels.to(device)
+            imgs = sample[0].to(device)
+            labels = sample[1].to(device)
             
             feats = model.features(imgs)
-            
             embeddings = F.normalize(feats, p=2, dim=1)
-            # Detach embeddings for tracking to avoid graph retention
+            
+            # Track embeddings and labels for mAP calculation
             all_embeddings.append(embeddings.detach().cpu())
             all_labels.append(labels.detach().cpu())
             
             current_batch_labels = labels.cpu().numpy()
             
-            # Collect all triplets for this batch before computing loss
+            # Collect quadruplet components
             anchors = []
             positives = []
             negatives = []
-            negatives_2 = []  # For the second negative in Quadruplet mining
-            batch_triplet_count = 0
-            
-            n_mbod_anchors = 0
+            negatives_2 = []
+            batch_quadruplet_count = 0
+            batch_n2_fallbacks = 0
+            batch_prof_0_anchors = 0
+            batch_prof_pos_anchors = 0
             n_ilo_anchors = 0
-
-            batch_matches = 0
-            dataset_matches = 0
-
-            n_bshn = 0
-            n_relaxed_bshn = 0
-            n_random = 0
-            n_bhn = 0
-
-            n_tb_anchors = 0
-            n_prof_anchors = 0
-
-            n_fallbacks = 0
             
-            # For each sample in the batch, build a triplet
+            # For each sample in the batch, build a quadruplet
             for i, positive_label in enumerate(current_batch_labels):
-                # print(f"Batch labels: {set(current_batch_labels)}")
-                # Positive embedding (from the current batch)
-                positive_embedding = embeddings[i].unsqueeze(0)  # shape [1, C]
+                positive_embedding = embeddings[i].unsqueeze(0)
 
-                # First attempt: Search within the current batch for another sample with the same label
-                batch_matching_indices = [j for j in range(len(current_batch_labels)) 
-                                         if current_batch_labels[j] == positive_label and j != i]
-                
-                if batch_matching_indices:
-                    # Found a matching label in the batch
-                    batch_anchor_idx = np.random.choice(batch_matching_indices)
-                    anchor_embedding = embeddings[batch_anchor_idx].unsqueeze(0)
-                    anchor_label = current_batch_labels[batch_anchor_idx]
-                    n_mbod_anchors += 1
-                    batch_matches += 1
-                else:
-                    # Fallback: Search the dataset for a sample with the same label
-                    # print(f"No matching label found in batch for label {positive_label}. Searching dataset...")
-                    matching_indices = labels_to_indices.get(positive_label.item(), [])
-                    
-                    if i in matching_indices:
-                        matching_indices.remove(i)
-                    
-                    if matching_indices:
-                        chosen_index = np.random.choice(matching_indices)
-                        anchor_img, anchor_label = train_loader.dataset.dataset[chosen_index]
-                        anchor_embedding = model.features(anchor_img.unsqueeze(0).to(device))
+
+            
+
+                if np.random.rand() < p_ilo_anchor:
+                    # Find ILO anchors with the same label as the positive sample
+                    ilo_indices = torch.where(ilo_labels == (positive_label % 4))[0]
+                    if len(ilo_indices) > 0:
+                        # Randomly select an ILO anchor
+                        ilo_idx = np.random.choice(ilo_indices.cpu().numpy())
+                        anchor_embedding = ilo_images[ilo_idx].unsqueeze(0)  # shape [1, C]
+                        anchor_embedding = model.features(anchor_embedding)  # Get features of the anchor
                         anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
-                        n_mbod_anchors += 1
-                        dataset_matches += 1
+                        anchor_label = ilo_labels[ilo_idx].item()  # Get the label of the anchor
+
+                        n_ilo_anchors += 1
+
+                        if(anchor_label % 4 > 0):
+                            batch_prof_0_anchors += 0
+                            batch_prof_pos_anchors += 1
+                        else:
+                            batch_prof_0_anchors += 1
+                            batch_prof_pos_anchors += 0
+                else:
+                
+                    # Find anchor with same label
+                    batch_matching_indices = [j for j in range(len(current_batch_labels)) 
+                                            if current_batch_labels[j] == positive_label and j != i]
+                    
+                    if batch_matching_indices:
+                        # Found matching label in batch
+                        batch_anchor_idx = np.random.choice(batch_matching_indices)
+                        anchor_embedding = embeddings[batch_anchor_idx].unsqueeze(0)
+                        anchor_label = current_batch_labels[batch_anchor_idx]
 
                     else:
-                        print('No matching indices found for label:', positive_label.item())
-                        continue  # Skip this sample and move to next one
+                        # Try finding matching sample in dataset
+                        matching_indices = labels_to_indices.get(positive_label.item(), [])
+                        if i in matching_indices:
+                            matching_indices.remove(i)
+                        
+                        if matching_indices:
+                            chosen_index = np.random.choice(matching_indices)
+                            anchor_img, anchor_label = train_loader.dataset.dataset[chosen_index]
+                            anchor_img = anchor_img.unsqueeze(0).to(device)
+                            anchor_embedding = model.features(anchor_img)
+                            anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
+
+                            if(anchor_label % 4 > 0):
+                                batch_prof_0_anchors += 0
+                                batch_prof_pos_anchors += 1
+                            else:
+                                batch_prof_0_anchors += 1
+                                batch_prof_pos_anchors += 0
+                        else:
+                            # Skip if no matching anchor found
+                            continue
+                    
                 
-                # Mining strategies for finding negative samples
-                negative_embedding = None
-                negative_label = None
-
-                # Find all negatives in the batch
-                tb_pos_label = 1 if positive_label >= 4 else 0  # TB status (0=negative, 1=positive)              
-
-                if mining_strat == "Quadruplet":
-                    # Additional constraint: Profusion score must be different.
+                # Find first negative using chosen mining strategy
+                if mining_strat == "BSHN-v2":
+                    # Look for negatives with different profusion score
                     prof_pos_score = positive_label % 4
                     pos_tb_status = 1 if positive_label >= 4 else 0
-
-                    negative_indices = []
-                    negative_indices_2 = []
-                    n_diff_tb = 0
-                    n_diff_mstb = 0
-                    n_diff_both = 0
-                    n_diff_prof = 0
-                    n_invalid = 0
-                    n_neg_2 = 0
-
-                    for j, label in enumerate(current_batch_labels):
-                        if label != positive_label:
-                            neg_prof_score = label % 4
-                            neg_tb_status = 1 if label >= 4 else 0
-
-                            if(neg_prof_score != prof_pos_score):
-                                # n1 must have a different profusion score
-                                n_diff_prof += 1
-                                negative_indices.append(j)
-
-                    if(len(negative_indices) == 0):
-                        # If no negatives with different profusion and TB status, try different profusion score
-                        print(f"n1: {len(negative_indices)}")
-                        continue
-
-                             
-                else:
-                    raise ValueError(f"Unknown mining strategy: {mining_strat}")
-
-
-                if len(negative_indices) > 0:
-
-                    wandb.log({
-                        "batch_negatives": len(negative_indices),
-                    })
-
-
-                    negative_embeddings = embeddings[negative_indices]  # shape [N_neg, C]
-
-                    # Repeat anchor to match shape [N_neg, C]
+                    
+                    negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                      if label != positive_label and (label % 4) != prof_pos_score]
+                    
+                    if not negative_indices:
+                        # Fallback to any negative
+                        negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                          if label != positive_label]
+                
+                if negative_indices:
+                    negative_embeddings = embeddings[negative_indices]
                     anchor_repeated = anchor_embedding.repeat(negative_embeddings.size(0), 1)
-
-                    # Compute pairwise distances: anchor vs. each negative
+                    
+                    # Compute distances
                     dists = F.pairwise_distance(anchor_repeated, negative_embeddings)
-
-                    # Compute anchor-positive distance
                     positive_distance = F.pairwise_distance(anchor_embedding, positive_embedding)
                     
-                    # Try increasingly relaxed criteria:
-                    # 1. First attempt: strict semi-hard negatives (original condition)
+                    # Find semi-hard negatives
                     semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + triplet_loss_fn.margin))
                     semi_hard_dists = dists[semi_hard_mask]
-
+                    
                     if semi_hard_dists.numel() > 0:
-                        # Pick the hardest among semi-hard (closest to positive)
+                        # Use semi-hard negative
                         hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
-                        
-                        # Map back to the original indices
                         semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
                         selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
                         
                         negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
                         negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
-                        n_bshn += 1
-                    
-                    # 2. Relaxed attempt: Increase margin
-                    else:
-                        larger_margin = triplet_loss_fn.margin * 1.5 
-                        semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + larger_margin))
-                        semi_hard_dists = dists[semi_hard_mask]
                         
-                        if semi_hard_dists.numel() > 0:
-                            hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
-                            semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
-                            selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
+                        # Find second negative with same profusion but different TB status
+                        negative_indices_2 = [j for j, label in enumerate(current_batch_labels) 
+                                           if (label % 4) == (negative_label % 4) and 
+                                              (int(label >= 4) != int(negative_label >= 4))]
+                        
+                        if negative_indices_2:
+                            neg_2_idx = np.random.choice(negative_indices_2)
+                            negative_embedding_2 = embeddings[neg_2_idx].unsqueeze(0)
+                            negative_label_2 = current_batch_labels[neg_2_idx]
                             
-                            negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
-                            negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
-                            n_relaxed_bshn += 1
+                            # Valid quadruplet found!
+                            anchors.append(anchor_embedding)
+                            positives.append(positive_embedding)
+                            negatives.append(negative_embedding)
+                            negatives_2.append(negative_embedding_2)
+                            batch_quadruplet_count += 1
+
+
+                            
+                            # Log first quadruplet for debugging
+                            if batch_idx == 0 and len(anchors) == 1:
+                                print(f"Quadruplet example:")
+                                print(f"A: {anchor_label}, P: {positive_label}, N1: {negative_label}, N2: {negative_label_2}")
+                                print(f"A-Prof: {anchor_label % 4}, P-Prof: {positive_label % 4}, N1-Prof: {negative_label % 4}, N2-Prof: {negative_label_2 % 4}")
+                                print(f"A-TB: {anchor_label >= 4}, P-TB: {positive_label >= 4}, N1-TB: {negative_label >= 4}, N2-TB: {negative_label_2 >= 4}")
                         
-                        # 3. Last resort: Just use the hardest negative that's farther than positive
                         else:
-                            hard_negatives_mask = dists > positive_distance
-                            hard_negative_dists = dists[hard_negatives_mask]
-                            
-                            if hard_negative_dists.numel() > 0:
-                                hard_idx_in_masked = torch.argmin(hard_negative_dists).item()
-                                hard_indices = torch.nonzero(hard_negatives_mask).squeeze(1)
-                                selected_neg_idx = hard_indices[hard_idx_in_masked].item()
-                                
-                                negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
-                                negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
-                                n_bhn += 1
-                            
-                            # 4. Final fallback: Random negative
-                            else:
-                                neg_idx = np.random.choice(negative_indices)
-                                negative_embedding = embeddings[neg_idx].unsqueeze(0)
-                                negative_label = current_batch_labels[neg_idx]
-                                n_random += 1   
+                            batch_quadruplet_count += 0
 
-
-                    # Now we select the second negative based on the second set of indices
-                    neg_prof_score = negative_label % 4
-                    neg_tb_status = 1 if negative_label >= 4 else 0
-
-                    negative_indices_2 = []
-
-                    for i in negative_indices:
-
-                        neg_prof_score_2 = current_batch_labels[i] % 4
-                        neg_tb_status_2 = 1 if current_batch_labels[i] >= 4 else 0
-
-                        if (neg_prof_score == neg_prof_score_2 and 
-                            neg_tb_status != neg_tb_status_2):
-                            # n2 must have the same profusion score and a different TB status
-                            negative_indices_2.append(i)
-
-                    if len(negative_indices_2) > 0:
-                        neg_idx_2 = np.random.choice(negative_indices_2)
-                        negative_embedding_2 = embeddings[neg_idx_2].unsqueeze(0)
-                        negative_label_2 = current_batch_labels[neg_idx_2]
-                        n_neg_2 += 1
-
-                        wandb.log({
-                            "batch_negatives_2": len(negative_indices_2),
-                        })
-
-                    else:
-                        print("Could not find a second negative with the same profusion score and different TB status!")
-                        n_invalid += 1
-                        negative_embedding_2 = None
-
-
-
-
-                else:
-                    print(f"No negatives found for positive label {positive_label}!!!")
-                    negative_embedding = None
-
-                    wandb.log({
-                        "batch_negatives": 0,
-                    })
-
-                # If we have valid triplet components, add them to the collection
-                if anchor_embedding is not None and positive_embedding is not None and negative_embedding is not None and negative_embedding_2 is not None:
-
-
-                    anchors.append(anchor_embedding)
-                    positives.append(positive_embedding)
-                    negatives.append(negative_embedding)
-                    negatives_2.append(negative_embedding_2)
-
-                    batch_triplet_count += 1
-
-                    n_tb_anchors += 1 if anchor_label >= 4 else 0
-                    n_prof_anchors += 1 if (anchor_label % 4 > 0) else 0
-                    
-                    # Track margin violations for monitoring (not for gradient)
-                    with torch.no_grad():
-                        is_violated, violation_amount = calculate_margin_violations(
-                            anchor_embedding, 
-                            positive_embedding, 
-                            negative_embedding, 
-                            triplet_loss_fn.margin
-                        )
-                        epoch_margin_violations.append(is_violated)
-                    
-                    # Log examples only for the first few triplets
-                    if batch_idx == 0 and (i < 2):
-                        print(f"A: {anchor_label}, P: {positive_label}, N: {negative_label}, N2: {negative_label_2}")
-                        # print(f"Margin Violated: {is_violated}, Violation Amount: {violation_amount:.4f}")
-            
-            # Only process if we found valid triplets
-            if batch_triplet_count > 0:
-                # Combine all triplet components
+            # Process collected quadruplets
+            if batch_quadruplet_count > 0:
+                # Combine all quadruplet components
                 batch_anchors = torch.cat(anchors, dim=0)
                 batch_positives = torch.cat(positives, dim=0)
                 batch_negatives = torch.cat(negatives, dim=0)
                 batch_negatives_2 = torch.cat(negatives_2, dim=0)
                 
-                # Calculate batch loss once using all triplets
-                batch_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
-
-                if mining_strat == "Quadruplet":
-                    curr_margin_2 = 0.5 * current_margin
-                    triplet_loss_fn_2 = nn.TripletMarginLoss(margin=curr_margin_2, p=2)
-                    batch_loss_2 = triplet_loss_fn_2(batch_anchors, batch_negatives, batch_negatives_2)
-                    batch_loss += batch_loss_2
+                # Calculate batch loss using all quadruplets
+                quad_loss = quadruplet_loss_fn(batch_anchors, batch_positives, batch_negatives, batch_negatives_2)
                 
-                # Backward pass - only once per batch
-                batch_loss.backward()
+                # For comparison/monitoring, calculate standard triplet loss
+                triplet_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
+                
+                # Use quadruplet loss for optimization
+                quad_loss.backward()
                 optimizer.step()
                 
-                # Track loss value (detached to avoid retaining computation graph)
-                avg_loss = batch_loss.item()
-                avg_loss_2 = batch_loss_2.item() if mining_strat == "Quadruplet" else 0.0
-                epoch_total_loss += batch_loss.item()
+                # Track metrics
+                epoch_total_loss += quad_loss.item()
                 epoch_batch_count += 1
+                epoch_quadruplet_count += batch_quadruplet_count
+
+
                 
-                # Log batch metrics
-                if log_to_wandb:
+                if log_to_wandb and batch_idx % 10 == 0:
                     wandb.log({
-                        "loss": avg_loss,
-                        "loss_2": avg_loss_2,
-                        "batch": batch_idx,
-                        "batch_mbod_anchors": n_mbod_anchors,
+                        "batch_quadruplet_loss": quad_loss.item(),
+                        "batch_triplet_loss": triplet_loss.item(),
+                        "batch_quadruplets": batch_quadruplet_count,
+                        "batch": batch_idx + epoch * len(train_loader),
                         "batch_ilo_anchors": n_ilo_anchors,
-                        "batch_matches": batch_matches,
-                        "dataset_matches": dataset_matches,
-                        "bshn_matches": n_bshn,
-                        "bhn_matches": n_bhn,
-                        "relaxed_bshn_matches": n_relaxed_bshn,
-                        "b_rand_matches": n_random,
-                        "batch_triplets": batch_triplet_count,
-                        "batch_tb_anchors": n_tb_anchors,
-                        "batch_prof_anchors": n_prof_anchors,
-                        "batch_fallbacks": n_fallbacks if (mining_strat != "BSHN") else 0,
-                        "batch_mstb_diff": n_diff_mstb,
-                        "batch_tb_diff": n_diff_tb,
-                        "batch_both_diff": n_diff_both,
+                        "batch_n2_fallbacks": batch_n2_fallbacks,
+                        "batch_prof_0_anchors": batch_prof_0_anchors,
+                        "batch_prof_pos_anchors": batch_prof_pos_anchors
+
                     })
             else:
-                print(f"Batch {batch_idx + 1}: No valid triplets found. Labels: {set(current_batch_labels)}")
+                print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
+                print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
+                del embeddings, feats, imgs, labels
+                torch.cuda.empty_cache()
+                gc.collect()
 
-                wandb.log({
-                    "batch_triplets": 0,
-                })
-            
-            # Clean up to free memory
-            del imgs, labels, feats, embeddings
-            if 'batch_anchors' in locals():
-                del batch_anchors, batch_positives, batch_negatives, batch_loss
-            torch.cuda.empty_cache()
         
-        # Calculate training metrics (only if we had any valid batches)
+        # End of epoch - calculate training metrics
         if epoch_batch_count > 0:
             train_loss = epoch_total_loss / epoch_batch_count
             print(f"Epoch {epoch + 1}/{n_epochs}, Train Loss: {train_loss:.4f}")
-        else:
-            train_loss = float('nan')
-            print(f"Epoch {epoch + 1}/{n_epochs}, No valid triplets found!")
-        
-        all_embeddings = torch.cat(all_embeddings, dim=0)
-        all_labels = torch.cat(all_labels, dim=0)
-        
-        train_map, train_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
-        prof_all_labels = all_labels % 4
-        train_prof_map, train_prof_class_map = helpers.compute_map_per_class(all_embeddings, prof_all_labels)
-        
-        # Make sure we log metrics for all classes even if they don't appear in the current epoch
-        train_class_map_full = {class_id: train_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
-        
-        print(f"Train mAP: {train_map:.4f}")
-        print("- Per-Class Train mAP:")
-        for class_id in range(num_classes):
-            ap = train_class_map_full.get(class_id, 0.0)
-            class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
-            print(f"  {class_name}: mAP = {ap:.4f}")
+            print(f"Total quadruplets formed: {epoch_quadruplet_count}")
             
-            # Store per-class metrics
-            per_class_metrics[class_id]['train_ap'].append(ap)
+            all_embeddings = torch.cat(all_embeddings, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+            
+            # Calculate mAP for full labels and profusion-only
+            train_map, train_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
+            prof_all_labels = all_labels % 4
+            train_prof_map, train_prof_class_map = helpers.compute_map_per_class(all_embeddings, prof_all_labels)
+            
+            # Ensure we track all classes
+            train_class_map_full = {class_id: train_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+            
+            print(f"Train mAP: {train_map:.4f}")
+            print("- Per-Class Train mAP:")
+            for class_id in range(num_classes):
+                ap = train_class_map_full.get(class_id, 0.0)
+                class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+                print(f"  {class_name}: mAP = {ap:.4f}")
+                
+                # Store per-class metrics
+                per_class_metrics[class_id]['train_ap'].append(ap)
 
-        # Calculate margin violation rate for this epoch
-        if epoch_margin_violations:
-            violation_rate = sum(epoch_margin_violations) / len(epoch_margin_violations)
-            print(f"Margin violation rate: {violation_rate:.4f} ({sum(epoch_margin_violations)}/{len(epoch_margin_violations)})")
+            # Calculate sensitivity at specificity
+            train_sensitivity, train_class_sensitivity = helpers.compute_sensitivity_at_specificity(
+                all_embeddings, all_labels, specificity_target=0.70)
+
+            print(f"Train Sensitivity@0.95Specificity: {train_sensitivity:.4f}")
+            print("- Per-Class Train Sensitivity@0.95Specificity:")
+            for class_id in range(num_classes):
+                sensitivity = train_class_sensitivity.get(class_id, 0.0)
+                class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+                print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
+
+            # Update history
+            history['train_sensitivity'].append(train_sensitivity)
+            history['train_class_sensitivity'].append(train_class_sensitivity)
+            history['train_loss'].append(train_loss)
+            history['train_map'].append(train_map)
+            history['train_class_map'].append(train_class_map_full)
+            history['train_prof_map'].append(train_prof_map)
         else:
-            violation_rate = 0.0
-            print("No triplets were formed to check for margin violations")
-
-        # Reset violation tracking for next epoch
-        epoch_margin_violations = []
-
-        # Log to WandB
-        if log_to_wandb:
-            wandb.log({
-                "margin_violation_rate": violation_rate,
-                "epoch": epoch + 1
-            })
+            print(f"Epoch {epoch + 1}/{n_epochs}: No valid quadruplets formed")
         
         # Run t-SNE visualization at regular intervals
         if (epoch + 1) % tsne_interval == 0:
             visualize_tsne(model, device, ilo_dataset, train_loader, 
-                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="training", entire_dataset=False, color_by_profusion=True)
+                          trained=True, log_to_wandb=log_to_wandb, 
+                          n_epochs=epoch+1, set_name="training", entire_dataset=False)
             visualize_tsne(model, device, ilo_dataset, val_loader, 
-                          trained=True, log_to_wandb=log_to_wandb, n_epochs=epoch+1, set_name="validation", entire_dataset=False, color_by_profusion=True)
+                          trained=True, log_to_wandb=log_to_wandb,
+                          n_epochs=epoch+1, set_name="validation", entire_dataset=False)
         
-        # Run validation
+        # Validation loop
         print("\nVALIDATION\n")
-        val_loss, val_map, val_class_map, val_embeddings, val_labels, val_violation, val_prof_map, _ = validate(
-            model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels, 
-            num_classes=num_classes, mining_strat=mining_strat
+        val_metrics = validate_quadruplet(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            triplet_loss_fn=triplet_loss_fn,
+            quadruplet_loss_fn=quadruplet_loss_fn,
+            num_classes=num_classes,
+            multiclass_stb_mapping=multiclass_stb_mapping,
+            mining_strat=mining_strat
         )
         
-        # Fill in missing classes in validation metrics
-        val_class_map_full = {class_id: val_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+        val_loss = val_metrics['val_quadruplet_loss']
+        val_map = val_metrics['val_map']
+        val_class_map = val_metrics['val_class_map']
+        val_prof_map = val_metrics['val_prof_map']
         
         # Store validation metrics for all classes
         for class_id in range(num_classes):
-            per_class_metrics[class_id]['val_ap'].append(val_class_map_full.get(class_id, 0.0))
+            per_class_metrics[class_id]['val_ap'].append(val_class_map.get(class_id, 0.0))
         
         # Update history
-        history['train_loss'].append(train_loss)
-        history['train_map'].append(train_map)
         history['val_loss'].append(val_loss)
         history['val_map'].append(val_map)
-        history['train_class_map'].append(train_class_map)
         history['val_class_map'].append(val_class_map)
-        history['train_prof_map'].append(train_prof_map)
         history['val_prof_map'].append(val_prof_map)
-
+        history['val_quadruplet_loss'].append(val_loss)
         
+        # Update history with validation metrics
+        history['val_sensitivity'].append(val_metrics['val_sensitivity'])
+        history['val_class_sensitivity'].append(val_metrics['val_class_sensitivity'])
+
         # Log metrics to wandb
         if log_to_wandb:
             wandb_log_dict = {
-                "train_loss": train_loss,
-                "train_map": train_map,
+                "epoch": epoch + 1,
+                "train_loss": train_loss if epoch_batch_count > 0 else 0.0,
+                "train_map": train_map if epoch_batch_count > 0 else 0.0,
                 "val_loss": val_loss,
                 "val_map": val_map,
-                "epoch": epoch + 1,
-                "current_margin": current_margin if margin_scheduling else triplet_loss_fn.margin,\
-                "train_prof_map": train_prof_map,
-                "val_prof_map": val_prof_map
+                "val_prof_map": val_prof_map,
+                "train_prof_map": train_prof_map if epoch_batch_count > 0 else 0.0,
+                "current_margin1": quadruplet_loss_fn.margin1,
+                "current_margin2": quadruplet_loss_fn.margin2,
+                "current_p_ilo_anchor": p_ilo_anchor if wandb.config.p_ilo_scheduling else wandb.config.p_ilo_anchor,
+                "train_quadruplets": epoch_quadruplet_count,
+                "train_sens@spec": train_sensitivity if epoch_batch_count > 0 else 0.0,  # Add this
+                "val_sens@spec": val_metrics['val_sensitivity']  # Add this
             }
-            # Log per-class metrics for all 8 classes
+
+            # Add per-class metrics for both mAP and sensitivity
             for class_id in range(num_classes):
-                class_name = multiclass_stb_mapping.get(class_id, f"class_{class_id}")
-                train_ap = train_class_map_full.get(class_id, 0.0)
-                val_ap = val_class_map_full.get(class_id, 0.0)
+                train_ap = train_class_map_full.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_ap = val_class_map.get(class_id, 0.0)
+                train_sens = train_class_sensitivity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_sens = val_metrics['val_class_sensitivity'].get(class_id, 0.0)
                 
                 wandb_log_dict[f"train_class_{class_id}_map"] = train_ap
                 wandb_log_dict[f"val_class_{class_id}_map"] = val_ap
-                #wandb_log_dict[f"train_{class_name}_map"] = train_ap
-                #wandb_log_dict[f"val_{class_name}_map"] = val_ap
+                wandb_log_dict[f"train_class_{class_id}_sensitivity"] = train_sens  # Add this
+                wandb_log_dict[f"val_class_{class_id}_sensitivity"] = val_sens  # Add this
+                        
+            # Log per-class metrics
+            for class_id in range(num_classes):
+                train_ap = train_class_map_full.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_ap = val_class_map.get(class_id, 0.0)
+                
+                wandb_log_dict[f"train_class_{class_id}_map"] = train_ap
+                wandb_log_dict[f"val_class_{class_id}_map"] = val_ap
             
             wandb.log(wandb_log_dict)
         
@@ -759,7 +806,14 @@ def train_model_mstb(
                 'optimizer_state_dict': optimizer.state_dict()
             }, os.path.join(checkpoint_dir, f"best_model.pth"))
 
+
             visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, True, True, n_epochs=epoch+1, set_name="best val mAP", entire_dataset=True)
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"GPU memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+        print(f"GPU memory cached: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+
         
         # Save latest model
         torch.save({
@@ -768,65 +822,47 @@ def train_model_mstb(
             'optimizer_state_dict': optimizer.state_dict()
         }, os.path.join(checkpoint_dir, f"final_model.pth"))
 
-    
     visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, True, True, n_epochs=n_epochs+1, set_name="final", entire_dataset=True)
+
     
-    # Return training results with class-specific metrics
+    # Return training results
     return {
         'model': model,
         'best_model_state': best_model_state,
         'history': history,
         'best_val_map': best_val_map,
-        'final_train_map': train_map,
-        'final_val_map': val_map,
         'per_class_metrics': per_class_metrics
     }
 
-def validate(model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels, num_classes=8, mining_strat="Random"):
+def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_loss_fn, num_classes=8, multiclass_stb_mapping=None, mining_strat="BSHN-v2"):
     """
-    Validation loop using the same triplet formation strategy as training.
+    Validation loop for quadruplet loss model
     
     Args:
         model: The model to evaluate
         val_loader: DataLoader for validation set
         device: Device to run validation on
-        triplet_loss_fn: Triplet loss function
-        ilo_images: Preloaded ILO images on GPU (kept for compatibility but not used)
-        ilo_labels: Preloaded ILO labels on GPU (kept for compatibility but not used)
+        triplet_loss_fn: Standard triplet loss function
+        quadruplet_loss_fn: Quadruplet loss function
         num_classes: Number of classes (default: 8)
-        mining_strat: Mining strategy for triplet loss (default: "Random")
-        
-    Returns:
-        val_loss: Average validation loss
-        val_map: Mean Average Precision on validation set
-        val_class_map: Per-class Average Precision
+        multiclass_stb_mapping: Dictionary mapping class IDs to names
+        mining_strat: Mining strategy for triplet formation
     """
-
-    multiclass_stb_mapping = {
-            0: "Profusion 0, No TB",
-            1: "Profusion 1, No TB",
-            2: "Profusion 2, No TB",
-            3: "Profusion 3, No TB",
-            4: "Profusion 0, With TB",
-            5: "Profusion 1, With TB",
-            6: "Profusion 2, With TB",
-            7: "Profusion 3, With TB",
-    }
+    if multiclass_stb_mapping is None:
+        multiclass_stb_mapping = {i: f"Class {i}" for i in range(num_classes)}
     
     model.eval()
-    running_loss = 0.0
+    running_quad_loss = 0.0
+    running_triplet_loss = 0.0
     all_embeddings = []
     all_labels = []
-    val_margin_violations = []
+    val_quadruplet_count = 0
+    batch_with_quadruplets = 0
     
-    print("Running validation loop...")
-    batch_with_triplets = 0  # Count of batches with valid triplets
-    total_triplets = 0  # Total valid triplets formed
-    
-    # First, build a map of validation labels to their indices
+    # Build a map of validation labels to their indices
     labels_to_indices = build_label_to_indices_map(val_loader.dataset.dataset)
     
-    with torch.no_grad():  # No gradient tracking for validation
+    with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
             # Get validation batch
             imgs = sample[0].to(device)
@@ -843,285 +879,182 @@ def validate(model, val_loader, device, triplet_loss_fn, ilo_images, ilo_labels,
             # Get labels from batch
             current_batch_labels = labels.cpu().numpy()
             
-            # Accumulators for batch loss
-            batch_triplet_loss = 0.0
-            n_triplets = 0
-            
-            # Collect all triplets for this batch
+            # Collect quadruplet components
             anchors = []
             positives = []
             negatives = []
             negatives_2 = []
+            batch_quadruplet_count = 0
             
-            batch_matches = 0
-            dataset_matches = 0
-            
-            # Form triplets using the same approach as in training
+            # Form quadruplets using the same strategy as in training
             for i, positive_label in enumerate(current_batch_labels):
-                # Positive embedding (from the current batch)
-                positive_embedding = embeddings[i].unsqueeze(0)  # shape [1, C]
-
-                # First attempt: Search within the current batch for another sample with the same label
+                # Positive embedding from current batch
+                positive_embedding = embeddings[i].unsqueeze(0)
+                
+                # Find anchor with same label
                 batch_matching_indices = [j for j in range(len(current_batch_labels)) 
-                                         if current_batch_labels[j] == positive_label and j != i]
+                                        if current_batch_labels[j] == positive_label and j != i]
                 
                 if batch_matching_indices:
-                    # Found a matching label in the batch
                     batch_anchor_idx = np.random.choice(batch_matching_indices)
                     anchor_embedding = embeddings[batch_anchor_idx].unsqueeze(0)
                     anchor_label = current_batch_labels[batch_anchor_idx]
-                    batch_matches += 1
                 else:
-                    # Fallback: Search the dataset for a sample with the same label
+                    # Try finding matching sample in dataset
                     matching_indices = labels_to_indices.get(positive_label.item(), [])
-                    
                     if i in matching_indices:
                         matching_indices.remove(i)
                     
                     if matching_indices:
                         chosen_index = np.random.choice(matching_indices)
                         anchor_img, anchor_label = val_loader.dataset.dataset[chosen_index]
-                        anchor_embedding = model.features(anchor_img.unsqueeze(0).to(device))
+                        anchor_img = anchor_img.unsqueeze(0).to(device)
+                        anchor_embedding = model.features(anchor_img)
                         anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
-                        dataset_matches += 1
                     else:
-                        # Skip if no matching samples found
                         continue
                 
-                # Mining strategies for finding negative samples
-                negative_embedding = None
-                negative_label = None
-                
-
-                if(mining_strat == "BSHN"):
-                    n_diff_tb = 0
-                    n_diff_mstb = 0
-                    n_diff_both = 0
-                    negative_indices = [j for j, label in enumerate(current_batch_labels) if label != positive_label]
-                    n_diff_mstb = len(negative_indices)
-
-
-                
-                elif mining_strat == "Quadruplet":
+                # Find first negative using the mining strategy
+                if mining_strat == "BSHN-v2":
                     prof_pos_score = positive_label % 4
-                    pos_tb_status = 1 if positive_label >= 4 else 0
-
-                    negative_indices = []
-                    negative_indices_2 = []
-                    n_diff_tb = 0
-                    n_diff_mstb = 0
-                    n_diff_both = 0
-                    n_diff_prof = 0
-
-                    n_invalid = 0
-
-                    for j, label in enumerate(current_batch_labels):
-                        if label != positive_label:
-                            neg_prof_score = label % 4
-
-                            if(neg_prof_score != prof_pos_score):
-                                n_diff_prof += 1
-                                negative_indices.append(j)
-                            
-                            neg_tb_status = 1 if label >= 4 else 0
-                            if(neg_tb_status != pos_tb_status):
-                                n_diff_tb += 1
-                                if j not in negative_indices:
-                                    negative_indices_2.append(j)
-                                                
-                    if(len(negative_indices) == 0 and len(negative_indices_2) == 0):
-                        # If no negatives with different profusion and TB status, try different TB status
-                        print(f"No validation negatives found using Quadruplet. Using BSHN.")
-                        negative_indices = [j for j, label in enumerate(current_batch_labels) if label != positive_label]
-                        n_diff_mstb = len(negative_indices) 
-
-
-                else:
-                    raise ValueError(f"Unknown validation mining strategy: {mining_strat}")
+                    
+                    negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                      if label != positive_label and (label % 4) != prof_pos_score]
+                    
+                    if not negative_indices:
+                        # Fallback to any negative
+                        negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                          if label != positive_label]
                 
-                if len(negative_indices) > 0:
-                    negative_embeddings = embeddings[negative_indices]  # shape [N_neg, C]
-
-                    # Repeat anchor to match shape [N_neg, C]
+                if negative_indices:
+                    negative_embeddings = embeddings[negative_indices]
                     anchor_repeated = anchor_embedding.repeat(negative_embeddings.size(0), 1)
-
-                    # Compute pairwise distances: anchor vs. each negative
+                    
+                    # Compute distances
                     dists = F.pairwise_distance(anchor_repeated, negative_embeddings)
-
-                    # Compute anchor-positive distance
                     positive_distance = F.pairwise_distance(anchor_embedding, positive_embedding)
                     
-                    # Try increasingly relaxed criteria:
-                    # 1. First attempt: strict semi-hard negatives
+                    # Find semi-hard negatives
                     semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + triplet_loss_fn.margin))
                     semi_hard_dists = dists[semi_hard_mask]
-
+                    
                     if semi_hard_dists.numel() > 0:
-                        # Pick the hardest among semi-hard (closest to positive)
+                        # Use semi-hard negative
                         hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
-                        
-                        # Map back to the original indices
                         semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
                         selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
                         
                         negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
                         negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
-                    
-                    # 2. Relaxed attempt: Increase margin
-                    else:
-                        larger_margin = triplet_loss_fn.margin * 1.5 
-                        semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + larger_margin))
-                        semi_hard_dists = dists[semi_hard_mask]
                         
-                        if semi_hard_dists.numel() > 0:
-                            hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
-                            semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
-                            selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
-                            
-                            negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
-                            negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
+                        # Find second negative with same profusion but different TB status
+                        negative_indices_2 = [j for j, label in enumerate(current_batch_labels) 
+                                          if (label % 4) == (negative_label % 4) and 
+                                             (int(label >= 4) != int(negative_label >= 4))]
                         
-                        # 3. Last resort: Just use the hardest negative that's farther than positive
-                        else:
-                            hard_negatives_mask = dists > positive_distance
-                            hard_negative_dists = dists[hard_negatives_mask]
+                        if negative_indices_2:
+                            neg_2_idx = np.random.choice(negative_indices_2)
+                            negative_embedding_2 = embeddings[neg_2_idx].unsqueeze(0)
                             
-                            if hard_negative_dists.numel() > 0:
-                                hard_idx_in_masked = torch.argmin(hard_negative_dists).item()
-                                hard_indices = torch.nonzero(hard_negatives_mask).squeeze(1)
-                                selected_neg_idx = hard_indices[hard_idx_in_masked].item()
-                                
-                                negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
-                                negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
-                            
-                            # 4. Final fallback: Random negative
-                            else:
-                                neg_idx = np.random.choice(negative_indices)
-                                negative_embedding = embeddings[neg_idx].unsqueeze(0)
-                                negative_label = current_batch_labels[neg_idx]
-                    
-                    # Now we select the second negative based on the second set of indices
-                    neg_prof_score = negative_label % 4
-                    neg_tb_status = 1 if negative_label >= 4 else 0
-
-                    negative_indices_2 = []
-
-                    for i in negative_indices:
-
-                        neg_prof_score_2 = current_batch_labels[i] % 4
-                        neg_tb_status_2 = 1 if current_batch_labels[i] >= 4 else 0
-
-                        if (neg_prof_score == neg_prof_score_2 and 
-                            neg_tb_status != neg_tb_status_2):
-                            # n2 must have the same profusion score and a different TB status
-                            negative_indices_2.append(i)
-
-                    if len(negative_indices_2) > 0:
-                        neg_idx_2 = np.random.choice(negative_indices_2)
-                        negative_embedding_2 = embeddings[neg_idx_2].unsqueeze(0)
-                        negative_label_2 = current_batch_labels[neg_idx_2]
-                        n_diff_both += 1
-
-                    else:
-                        print("Could not find a second negative with the same profusion score and different TB status!")
-                        n_invalid += 1
-                        negative_embedding_2 = None
-
-
-                # If we have valid triplet components, add them to the collection
-                if anchor_embedding is not None and positive_embedding is not None and negative_embedding is not None and negative_embedding_2 is not None:
-                    anchors.append(anchor_embedding)
-                    positives.append(positive_embedding)
-                    negatives.append(negative_embedding)
-                    negatives_2.append(negative_embedding_2)
-
-                    n_triplets += 1
-                    
-                    # Track margin violations for monitoring
-                    is_violated, violation_amount = calculate_margin_violations(
-                        anchor_embedding, 
-                        positive_embedding, 
-                        negative_embedding, 
-                        triplet_loss_fn.margin
-                    )
-                    val_margin_violations.append(is_violated)
-                    
-                    # Log triplet details for the first batch
-                    if batch_idx == 0 and i == 0:
-                        print(f"A: {anchor_label}, P: {positive_label}, N: {negative_label}, N2: {negative_label_2}")
-                        print(f"A (TB): {anchor_label >= 4}, P (TB): {positive_label >= 4}, N (TB): {negative_label >= 4}, N2 (TB): {negative_label_2 >= 4}")
-                        print(f"Loss: {violation_amount:.4f}")
+                            # Add to collections
+                            anchors.append(anchor_embedding)
+                            positives.append(positive_embedding)
+                            negatives.append(negative_embedding)
+                            negatives_2.append(negative_embedding_2)
+                            batch_quadruplet_count += 1
             
-            # Process collected triplets
-            if n_triplets > 0:
-                # Combine all triplet components
+            # Process collected quadruplets
+            if batch_quadruplet_count > 0:
+                # Combine all quadruplet components
                 batch_anchors = torch.cat(anchors, dim=0)
                 batch_positives = torch.cat(positives, dim=0)
                 batch_negatives = torch.cat(negatives, dim=0)
                 batch_negatives_2 = torch.cat(negatives_2, dim=0)
                 
-                # Calculate batch loss once using all triplets
-                batch_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
-
-                if mining_strat == "Quadruplet":
-                    curr_margin_2 = 0.5 * triplet_loss_fn.margin
-                    triplet_loss_fn_2 = nn.TripletMarginLoss(margin=curr_margin_2, p=2)
-                    batch_loss_2 = triplet_loss_fn_2(batch_anchors, batch_negatives, batch_negatives_2)
-                    batch_loss += batch_loss_2
+                # Calculate losses
+                quad_loss = quadruplet_loss_fn(batch_anchors, batch_positives, batch_negatives, batch_negatives_2)
+                triplet_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
                 
-                running_loss += batch_loss.item()
-                batch_with_triplets += 1
-                total_triplets += n_triplets
-            else:
-                print(f"Validation Batch {batch_idx + 1}: No valid triplets found. Labels: {set(current_batch_labels)}")
+                running_quad_loss += quad_loss.item()
+                running_triplet_loss += triplet_loss.item()
+                batch_with_quadruplets += 1
+                val_quadruplet_count += batch_quadruplet_count
     
     # Calculate validation metrics
     if all_embeddings:
         all_embeddings = torch.cat(all_embeddings, dim=0)
         all_labels = torch.cat(all_labels, dim=0)
         
+        # Calculate mAP for full labels
         val_map, val_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
-
-        val_prof_labels = all_labels % 4
-        val_prof_map, val_prof_class_map = helpers.compute_map_per_class(all_embeddings, val_prof_labels)
         
-        # Fill in any missing classes
-        val_class_map_full = {class_id: val_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+        # Calculate mAP for profusion scores only
+        prof_all_labels = all_labels % 4
+        val_prof_map, val_prof_class_map = helpers.compute_map_per_class(all_embeddings, prof_all_labels)
         
-        # Calculate average validation loss
-        val_loss = running_loss / max(1, batch_with_triplets)
+        # Calculate average validation losses
+        avg_quad_loss = running_quad_loss / max(1, batch_with_quadruplets)
+        avg_triplet_loss = running_triplet_loss / max(1, batch_with_quadruplets)
         
         print(f"\nValidation Summary:")
-        print(f"- Total batches with valid triplets: {batch_with_triplets}/{batch_idx+1}")
-        print(f"- Total valid triplets formed: {total_triplets}")
-        print(f"- Validation Loss: {val_loss:.4f}")
+        print(f"- Total quadruplets formed: {val_quadruplet_count}")
+        print(f"- Avg Quadruplet Loss: {avg_quad_loss:.4f}")
+        print(f"- Avg Triplet Loss: {avg_triplet_loss:.4f}")
         print(f"- Validation mAP: {val_map:.4f}")
+        print(f"- Validation Profusion mAP: {val_prof_map:.4f}")
         print("- Per-Class Validation mAP:")
         
-        # Print metrics for all 8 classes
+        # Create full map including any missing classes
+        val_class_map_full = {class_id: val_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+        
         for class_id in range(num_classes):
             ap = val_class_map_full.get(class_id, 0.0)
             class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
             print(f"  {class_name}: mAP = {ap:.4f}")
         
-        # Calculate validation margin violation rate
-        if val_margin_violations:
-            val_violation_rate = sum(val_margin_violations) / len(val_margin_violations)
-            print(f"- Validation margin violation rate: {val_violation_rate:.4f} ({sum(val_margin_violations)}/{len(val_margin_violations)})")
-        else:
-            val_violation_rate = 0.0
-            
+        # Log validation metrics
         wandb.log({
-            "val_margin_violation_rate": val_violation_rate,
-            "val_batch_matches": batch_matches,
-            "val_dataset_matches": dataset_matches
+            "val_quadruplet_loss": avg_quad_loss,
+            "val_triplet_loss": avg_triplet_loss,
+            "val_quadruplets": val_quadruplet_count
         })
+        
+        # Calculate sensitivity at specificity
+        val_sensitivity, val_class_sensitivity = helpers.compute_sensitivity_at_specificity(
+            all_embeddings, all_labels, specificity_target=0.70)
 
-        return val_loss, val_map, val_class_map_full, all_embeddings, all_labels, val_violation_rate, val_prof_map, val_prof_class_map
-    
-    return 0.0, 0.0, {class_id: 0.0 for class_id in range(num_classes)}, None, None, None
+        print(f"- Validation Sensitivity@0.95Specificity: {val_sensitivity:.4f}")
+        print("- Per-Class Validation Sensitivity@0.95Specificity:")
+        for class_id in range(num_classes):
+            sensitivity = val_class_sensitivity.get(class_id, 0.0)
+            class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+            print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
 
-
+        # Return the sensitivity metrics with the other validation metrics
+        return {
+            'val_quadruplet_loss': avg_quad_loss,
+            'val_triplet_loss': avg_triplet_loss,
+            'val_map': val_map,
+            'val_class_map': val_class_map_full,
+            'val_prof_map': val_prof_map,
+            'val_prof_class_map': val_prof_class_map,
+            'val_embeddings': all_embeddings,
+            'val_labels': all_labels,
+            'val_sensitivity': val_sensitivity,
+            'val_class_sensitivity': val_class_sensitivity  # Add this
+        }
+            
+    # Return empty metrics if no quadruplets were formed
+    return {
+        'val_quadruplet_loss': 0.0,
+        'val_triplet_loss': 0.0,
+        'val_map': 0.0,
+        'val_class_map': {class_id: 0.0 for class_id in range(num_classes)},
+        'val_prof_map': 0.0,
+        'val_prof_class_map': {class_id: 0.0 for class_id in range(4)},
+        'val_embeddings': None,
+        'val_labels': None
+    }
 
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1161,38 +1094,43 @@ if __name__ == "__main__":
             augmentations=None,
             preprocess=preprocess
         )
-        
 
-        train_loader, val_loader, test_loader = get_dataloaders(
-        hdf5_path=hdf5_file_path,
-        preprocess=preprocess,
-        batch_size=16,
-        labels_key="multiclass_stb",
-        split_file="stratified_split_filt.json",
-        augmentations=None,
-        oversample=True,
-        balanced_batches=False,
-        scaling_factor = 0.5
-        )
+        
+        multiclass_stb_mapping = {
+            0: "Profusion 0, No TB",
+            1: "Profusion 1, No TB",
+            2: "Profusion 2, No TB",
+            3: "Profusion 3, No TB",
+            4: "Profusion 0, With TB",
+            5: "Profusion 1, With TB",
+            6: "Profusion 2, With TB",
+            7: "Profusion 3, With TB"
+        }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl', name='test-quad-sin_m_01_05',
+        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-p_ilo_05_01-m_005_4',
             config={
-                "batch_size": 32,
+                "experiment_type": "Quadruplet (TNR)",
+                "beta_factor": 0.25,
+                "dataset": "MBOD ONLY",
+                "labeling_scheme": "MSTB",
+                "batch_size": 24,
                 "n_epochs": 1000,
                 "learning_rate": 1e-4,
                 "oversample": True,
-                "initial_margin": 0.1,      
-                "final_margin": 0.5,        
+                "initial_margin": 0.05,      
+                "final_margin": 0.4,        
                 "margin_scheduling": True,   # Enable margin scheduling
-                "scheduling_fraction": 0.85,  # Complete scheduling in first x% of training
-                "mining": "Quadruplet",
+                "scheduling_fraction": 0.75,  # Complete scheduling in first x% of training
+                "mining": "BSHN-v2",
                 "augmentations": True,
                 "filtered_dataset": True,
-                "loss_function": "Quadruplet",
-                "p_ilo_anchor": 0.0,
+                "loss_function": "Triplet",
+                "p_ilo_anchor": 0.5,
+                "p_ilo_final": 0.1,
                 "num_classes": 8,  # Explicitly specify 8 classes
-                "OS_factor": 0.8,  # Oversampling factor
+                "OS_factor": 0.75,  # Oversampling factor
+                "p_ilo_scheduling": True,  # Enable p_ilo scheduling
             })
 
         experiment_name = wandb.run.name
@@ -1206,6 +1144,20 @@ if __name__ == "__main__":
             weight_decay=wandb.config.learning_rate  # Add L2 regularization
         )
         triplet_loss_fn = nn.TripletMarginLoss(margin=wandb.config.initial_margin, p=2)
+
+        margin_1 = wandb.config.initial_margin
+        margin_2 = wandb.config.initial_margin * wandb.config.beta_factor
+
+
+        if "RNR" in wandb.config.experiment_type:
+            loss_type = "RelativeNegativeRanking"
+        elif "TNR" in wandb.config.experiment_type:
+            loss_type = "TieredNegativeRanking"
+        else:
+            assert ValueError(f"Unknown experiment type: {wandb.config.experiment_type}")
+            loss_type="NONE"
+
+        quadruplet_loss_fn = QuadrupletMarginLoss(margin1=margin_1, margin2=margin_2, p=2, type=loss_type)
 
         n_epochs = wandb.config.n_epochs
         margin = wandb.config.initial_margin
@@ -1240,10 +1192,9 @@ if __name__ == "__main__":
                 preprocess=preprocess,
                 batch_size=wandb.config.batch_size,
                 labels_key="multiclass_stb",
-                split_file="stratified_split_filt.json",
+                split_file="stratified_split_mstb_new.json",
                 augmentations=augmentations_list,
                 oversample=wandb.config.oversample,
-                balanced_batches=True if wandb.config.loss_function == "PCCT" else False,
                 scaling_factor = wandb.config.OS_factor 
             )
 
@@ -1252,10 +1203,9 @@ if __name__ == "__main__":
                 preprocess=preprocess,
                 batch_size=wandb.config.batch_size,
                 labels_key="multiclass_stb",
-                split_file="stratified_split_filt.json",
+                split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=None,
-                balanced_batches=True if wandb.config.loss_function == "PCCT" else False,
                 scaling_factor = wandb.config.OS_factor 
             )
 
@@ -1265,10 +1215,9 @@ if __name__ == "__main__":
                 preprocess=preprocess,
                 batch_size=wandb.config.batch_size,
                 labels_key="multiclass_stb",
-                split_file="stratified_split_filt.json",
+                split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=wandb.config.oversample,
-                balanced_batches=True if wandb.config.loss_function == "PCCT" else False,
                 scaling_factor = wandb.config.OS_factor
             )
 
@@ -1277,12 +1226,14 @@ if __name__ == "__main__":
                 preprocess=preprocess,
                 batch_size=wandb.config.batch_size,
                 labels_key="multiclass_stb",
-                split_file="stratified_split_filt.json",
+                split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=None,
-                balanced_batches=True if wandb.config.loss_function == "PCCT" else False,
                 scaling_factor = wandb.config.OS_factor
             )
+
+
+
 
         print("Preloading ILO images onto the GPU...")
         ilo_images = []
@@ -1305,43 +1256,20 @@ if __name__ == "__main__":
         print(f"ILO images loaded onto GPU: {ilo_images.shape}")
         print(f"ILO labels loaded onto GPU: {ilo_labels.shape}")
 
-        visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=True)
-        visualize_tsne(model, device, ilo_dataset, train_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=False)
-
-
-        # results = train_triplet_model(
-        #     model=model,
-        #     device=device,
-        #     train_loader=train_loader,
-        #     val_loader=val_loader,
-        #     optimizer=optimizer,
-        #     triplet_loss_fn=triplet_loss_fn,
-        #     n_epochs=n_epochs,
-        #     oversample=wandb.config.oversample,
-        #     augmentations=wandb.config.augmentations,
-        #     experiment_name=experiment_name,
-        #     checkpoint_dir="/home/sean/MSc_2025/codev2/checkpoints",
-        #     tsne_interval=10,  # Save t-SNE every 10 epochs
-        #     log_to_wandb=True,
-        #     margin_scheduling=wandb.config.margin_scheduling,
-        #     initial_margin=wandb.config.initial_margin,
-        #     final_margin=wandb.config.final_margin,
-        #     scheduling_fraction=wandb.config.scheduling_fraction,
-        #     p_ilo_anchor=wandb.config.p_ilo_anchor
-        # )
-
-        results = train_model_mstb(
-            model,
-            train_loader,
-            val_loader,
-            ilo_dataset,
-            ilo_images,
-            ilo_labels,
-            triplet_loss_fn,
-            optimizer,
-            device,
-            n_epochs,
-            experiment_name,
+        visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=True, is_mstb=False)
+        visualize_tsne(model, device, ilo_dataset, train_loader, trained=False, log_to_wandb=True, set_name="pre-training", entire_dataset=False, is_mstb=False)
+        
+        
+        results = train_model_quadruplet(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            triplet_loss_fn=triplet_loss_fn,
+            quadruplet_loss_fn=quadruplet_loss_fn,
+            optimizer=optimizer,
+            device=device,
+            n_epochs=n_epochs,
+            experiment_name=experiment_name,
             margin_scheduling=wandb.config.margin_scheduling,
             initial_margin=wandb.config.initial_margin,
             final_margin=wandb.config.final_margin,
@@ -1350,9 +1278,7 @@ if __name__ == "__main__":
             p_ilo_anchor=wandb.config.p_ilo_anchor
         )
 
-
-                
-
+       
 
     except KeyError as e:
         print(f"Missing configuration: {e}")
