@@ -123,7 +123,7 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
                  p: float = 2.,
                  eps: float = 1e-6,
                  swap: bool = False,
-                 type: str = 'anchor-push',  # 'anchor-push' or 'structured'
+                 type: str = 'DoubleTriplet',  # 'DoubleTriplet' or 'structured'
                  size_average=None,
                  reduce=None,
                  reduction: str = 'mean'):
@@ -134,7 +134,7 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
         self.eps = eps
         self.swap = swap
         self.reduction = reduction
-        assert type in ['anchor-push', 'structured', 'TieredNegativeRanking', 'RelativeNegativeRanking']
+        assert type in ['DoubleTriplet', 'structured', 'TieredNegativeRanking', 'RelativeNegativeRanking']
         self.type = type
 
     def forward(self, anchor: Tensor, positive: Tensor, negative1: Tensor, negative2: Tensor) -> Tensor:
@@ -152,7 +152,7 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
                                       swap=self.swap,
                                       reduction='none')
 
-        if self.type == 'anchor-push':
+        if self.type == 'DoubleTriplet':
             # Second term: second negative pushed from anchor
             loss2 = F.triplet_margin_loss(anchor, positive, negative2,
                                           margin=self.margin2,
@@ -180,7 +180,8 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
             loss1 = torch.clamp(d_ap - d_an2 + self.margin1, min=0.0)
             
             # Second term: negative2 vs negative1 from anchor perspective
-            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)    
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)
+      
 
         # Combine terms and apply reduction
         loss = loss1 + loss2
@@ -191,7 +192,6 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
             return loss.sum()
         else:
             return loss
-
 def build_profusion_tb_map(dataset):
     """
     Create dictionaries mapping samples by their profusion score and TB status separately.
@@ -492,6 +492,7 @@ def train_model_quadruplet(
             batch_n2_fallbacks = 0
             batch_prof_0_anchors = 0
             batch_prof_pos_anchors = 0
+            batch_prof_prioritized_negative_1 = 0
             n_ilo_anchors = 0
             
             # For each sample in the batch, build a quadruplet
@@ -569,7 +570,7 @@ def train_model_quadruplet(
                         # Fallback to any negative
                         negative_indices = [j for j, label in enumerate(current_batch_labels) 
                                           if label != positive_label]
-                
+                        
                 if negative_indices:
                     negative_embeddings = embeddings[negative_indices]
                     anchor_repeated = anchor_embedding.repeat(negative_embeddings.size(0), 1)
@@ -587,7 +588,27 @@ def train_model_quadruplet(
                         hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
                         semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
                         selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
-                        
+
+
+                        if wandb.config.prioritize_prof_n1:
+                            # Prioritize BSHN negatives with highest difference in profusion
+                            semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
+                            neg_labels = [current_batch_labels[negative_indices[idx.item()]] for idx in semi_hard_indices]
+                            
+                            # Calculate profusion difference between each negative and anchor
+                            anchor_prof = anchor_label % 4
+                            prof_differences = np.array([abs((label % 4) - anchor_prof) for label in neg_labels])
+                            
+                            # Find the negative with highest profusion difference among semi-hard negatives
+                            if len(prof_differences) > 0:
+                                max_diff_idx = np.argmax(prof_differences)
+                                selected_neg_idx = semi_hard_indices[max_diff_idx].item()
+                            else:
+                                # Fallback to regular semi-hard selection when no profusion differences
+                                hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
+                                selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
+                                batch_prof_prioritized_negative_1 += 1
+
                         negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
                         negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
                         
@@ -654,8 +675,8 @@ def train_model_quadruplet(
                         "batch_ilo_anchors": n_ilo_anchors,
                         "batch_n2_fallbacks": batch_n2_fallbacks,
                         "batch_prof_0_anchors": batch_prof_0_anchors,
-                        "batch_prof_pos_anchors": batch_prof_pos_anchors
-
+                        "batch_prof_pos_anchors": batch_prof_pos_anchors,
+                        "batch_prof_prioritized_negative_1": batch_prof_prioritized_negative_1,
                     })
             else:
                 print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
@@ -808,11 +829,17 @@ def train_model_quadruplet(
 
 
             visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, True, True, n_epochs=epoch+1, set_name="best val mAP", entire_dataset=True)
-        
-        torch.cuda.empty_cache()
-        gc.collect()
-        print(f"GPU memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
-        print(f"GPU memory cached: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+    
+
+        if (torch.cuda.memory_allocated()/1e9) > 3:
+            print(f"\n BEFORE \n")
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+            print(f"GPU memory cached: {torch.cuda.memory_reserved()/1e9:.2f} GB")
+            torch.cuda.empty_cache()
+            gc.collect()
+            print(f"\n AFTER \n")
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+            print(f"GPU memory cached: {torch.cuda.memory_reserved()/1e9:.2f} GB")
 
         
         # Save latest model
@@ -1108,9 +1135,10 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-p_ilo_05_01-m_005_4',
+        wandb.init(project='MBOD-cl-2', name='mstb_quad_dbl_triplet',
             config={
-                "experiment_type": "Quadruplet (TNR)",
+                "experiment_type": "Quadruplet (Double Triplet)",
+                "prioritize_prof_n1": True,  # Prioritize highest profusion difference for N1 samples
                 "beta_factor": 0.25,
                 "dataset": "MBOD ONLY",
                 "labeling_scheme": "MSTB",
@@ -1148,11 +1176,18 @@ if __name__ == "__main__":
         margin_1 = wandb.config.initial_margin
         margin_2 = wandb.config.initial_margin * wandb.config.beta_factor
 
-
         if "RNR" in wandb.config.experiment_type:
             loss_type = "RelativeNegativeRanking"
+            
         elif "TNR" in wandb.config.experiment_type:
             loss_type = "TieredNegativeRanking"
+            
+        elif "SNR" in wandb.config.experiment_type:
+            loss_type = "SequentialNegativeRanking"
+            
+        elif "DoubleTriplet" in wandb.config.experiment_type:
+            loss_type = "DoubleTriplet"
+            
         else:
             assert ValueError(f"Unknown experiment type: {wandb.config.experiment_type}")
             loss_type="NONE"
