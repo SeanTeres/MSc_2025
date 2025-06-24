@@ -134,7 +134,7 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
         self.eps = eps
         self.swap = swap
         self.reduction = reduction
-        assert type in ['anchor-push', 'structured', 'TieredNegativeRanking', 'RelativeNegativeRanking']
+        assert type in ['structured', 'TieredNegativeRanking', 'RelativeNegativeRanking', 'DoubleTriplet', 'SequentialNegativeRanking']
         self.type = type
 
     def forward(self, anchor: Tensor, positive: Tensor, negative1: Tensor, negative2: Tensor) -> Tensor:
@@ -152,7 +152,7 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
                                       swap=self.swap,
                                       reduction='none')
 
-        if self.type == 'anchor-push':
+        if self.type == 'DoubleTriplet':
             # Second term: second negative pushed from anchor
             loss2 = F.triplet_margin_loss(anchor, positive, negative2,
                                           margin=self.margin2,
@@ -180,7 +180,14 @@ class QuadrupletMarginLoss(nn.modules.loss._Loss):
             loss1 = torch.clamp(d_ap - d_an2 + self.margin1, min=0.0)
             
             # Second term: negative2 vs negative1 from anchor perspective
-            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)    
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)
+
+        elif self.type == 'SequentialNegativeRanking':
+        # First term: standard triplet loss (anchor-positive vs anchor-negative1)
+            loss1 = torch.clamp(d_ap - d_an1 + self.margin1, min=0.0)
+            
+            # Second term: negative2 vs negative1 from anchor perspective
+            loss2 = torch.clamp(d_an1 - d_an2 + self.margin2, min=0.0)     
 
         # Combine terms and apply reduction
         loss = loss1 + loss2
@@ -211,7 +218,7 @@ def build_profusion_tb_map(dataset):
     
     print("Building profusion and TB status maps...")
     for idx in range(len(dataset)):
-        _, label = dataset[idx]
+        _, label,_ = dataset[idx]
         
         if isinstance(label, torch.Tensor):
             label = label.item()
@@ -268,7 +275,7 @@ def build_label_to_indices_map(dataset):
     
     print("Building label-to-indices map...")
     for idx in range(len(dataset)):
-        _, label = dataset[idx]
+        _, label, _ = dataset[idx]
         if isinstance(label, torch.Tensor):
             label = label.item()
             
@@ -373,7 +380,6 @@ def train_model_quadruplet(
 
     # Create label-to-indices map for finding appropriate anchors
     labels_to_indices = build_label_to_indices_map(train_loader.dataset.dataset)
-    prof_tb_labels = build_profusion_tb_map(train_loader.dataset.dataset)
 
     # Margin scheduling functions
     def get_sin_scheduled_margin(current_epoch):
@@ -437,7 +443,6 @@ def train_model_quadruplet(
     print("***"*50)
     print("\n")
 
-    print_dataloader_label_distribution(train_loader, label_mapping=multiclass_stb_mapping)
 
     print("\n")
     print("***"*50)
@@ -540,7 +545,7 @@ def train_model_quadruplet(
                         
                         if matching_indices:
                             chosen_index = np.random.choice(matching_indices)
-                            anchor_img, anchor_label = train_loader.dataset.dataset[chosen_index]
+                            anchor_img, anchor_label, _ = train_loader.dataset.dataset[chosen_index]
                             anchor_img = anchor_img.unsqueeze(0).to(device)
                             anchor_embedding = model.features(anchor_img)
                             anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
@@ -660,9 +665,10 @@ def train_model_quadruplet(
             else:
                 print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
                 print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
-                del embeddings, feats, imgs, labels
+                del embeddings, feats, imgs, labels, positive_embedding, negative_embeddings, anchor_embedding, dists, semi_hard_mask, semi_hard_dists
                 torch.cuda.empty_cache()
                 gc.collect()
+                continue
 
         
         # End of epoch - calculate training metrics
@@ -907,7 +913,7 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
                     
                     if matching_indices:
                         chosen_index = np.random.choice(matching_indices)
-                        anchor_img, anchor_label = val_loader.dataset.dataset[chosen_index]
+                        anchor_img, anchor_label, _ = val_loader.dataset.dataset[chosen_index]
                         anchor_img = anchor_img.unsqueeze(0).to(device)
                         anchor_embedding = model.features(anchor_img)
                         anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
@@ -979,6 +985,14 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
                 running_triplet_loss += triplet_loss.item()
                 batch_with_quadruplets += 1
                 val_quadruplet_count += batch_quadruplet_count
+
+            else:
+                print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
+                print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
+                del embeddings, features, imgs, labels, positive_embedding, negative_embeddings, anchor_embedding, dists, semi_hard_mask, semi_hard_dists
+                torch.cuda.empty_cache()
+                gc.collect()
+                continue
     
     # Calculate validation metrics
     if all_embeddings:
@@ -1057,7 +1071,7 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
     }
 
 if __name__ == "__main__":
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
     print(f"Using device: {device}")
     print("*" * 50)
@@ -1110,7 +1124,7 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-TB_Net_pos',
+        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-TB_Net_pos-p_ilo_07_03',
             config={
                 "experiment_type": "Quadruplet (TNR)",
                 "beta_factor": 0.25,
@@ -1123,13 +1137,13 @@ if __name__ == "__main__":
                 "initial_margin": 0.05,      
                 "final_margin": 0.4,        
                 "margin_scheduling": True,   # Enable margin scheduling
-                "scheduling_fraction": 0.75,  # Complete scheduling in first x% of training
+                "scheduling_fraction": 0.90,  # Complete scheduling in first x% of training
                 "mining": "BSHN-v2",
                 "augmentations": False,
                 "filtered_dataset": True,
                 "loss_function": "Triplet",
-                "p_ilo_anchor": 0.5,
-                "p_ilo_final": 0.1,
+                "p_ilo_anchor": 0.7,
+                "p_ilo_final": 0.3,
                 "num_classes": 8,  # Explicitly specify 8 classes
                 "OS_factor": 0.75,  # Oversampling factor
                 "p_ilo_scheduling": True,  # Enable p_ilo scheduling
@@ -1153,8 +1167,16 @@ if __name__ == "__main__":
 
         if "RNR" in wandb.config.experiment_type:
             loss_type = "RelativeNegativeRanking"
+
         elif "TNR" in wandb.config.experiment_type:
             loss_type = "TieredNegativeRanking"
+
+        elif "SNR" in wandb.config.experiment_type:
+            loss_type = "SequentialNegativeRanking"
+
+        elif "DoubleTriplet" in wandb.config.experiment_type:
+            loss_type = "DoubleTriplet"
+
         else:
             assert ValueError(f"Unknown experiment type: {wandb.config.experiment_type}")
             loss_type="NONE"
