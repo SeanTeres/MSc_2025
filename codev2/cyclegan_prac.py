@@ -59,6 +59,125 @@ def plot_images(images, titles=None, cols=4):
     plt.savefig("cycle_gan_results.png")
     plt.show()
 
+def log_sample_images(cycle_gan, ae, mbod_sample, tb_sample, epoch, device):
+    """
+    Generate sample transformations using CycleGAN and log them to wandb
+    
+    Args:
+        cycle_gan: The CycleGAN model
+        ae: The autoencoder model for encoding/decoding
+        mbod_sample: Batch of MBOD images
+        tb_sample: Batch of TB images
+        epoch: Current epoch number
+        device: Device to use for processing
+    """
+    cycle_gan.eval()
+    with torch.no_grad():
+        # Encode images
+        encoded_mbod = ae.encode(mbod_sample).sample()
+        encoded_tb = ae.encode(tb_sample).sample()
+        
+        # Generate translations in the latent space
+        fake_tb = cycle_gan.gen_MBOD2TB(encoded_mbod)
+        fake_mbod = cycle_gan.gen_TB2MBOD(encoded_tb)
+        
+        # Generate reconstructions in the latent space
+        recov_mbod = cycle_gan.gen_TB2MBOD(fake_tb)
+        recov_tb = cycle_gan.gen_MBOD2TB(fake_mbod)
+        
+        # Decode to get full resolution images
+        fake_tb_img = ae.decode(fake_tb)
+        fake_mbod_img = ae.decode(fake_mbod)
+        recov_mbod_img = ae.decode(recov_mbod)
+        recov_tb_img = ae.decode(recov_tb)
+        
+        # Create image arrays for each sample
+        for i in range(min(4, mbod_sample.size(0))):  # Limit to maximum 4 samples
+            original_mbod = mbod_sample[i].cpu()
+            original_tb = tb_sample[i].cpu()
+            
+            # Get the images for this sample
+            sample_images = [
+                original_mbod.squeeze(),
+                original_tb.squeeze(),
+                fake_tb_img[i].cpu().squeeze(),
+                fake_mbod_img[i].cpu().squeeze(),
+                recov_mbod_img[i].cpu().squeeze(),
+                recov_tb_img[i].cpu().squeeze()
+            ]
+            
+            # Create a figure for this sample
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            fig.suptitle(f"Sample {i+1} - Epoch {epoch+1}", fontsize=16)
+            
+            titles = [
+                "MBOD Original", "TB Original",
+                "MBOD→TB", "TB→MBOD",
+                "MBOD→TB→MBOD", "TB→MBOD→TB"
+            ]
+            
+            for j, (img, title) in enumerate(zip(sample_images, titles)):
+                row, col = j // 3, j % 3
+                axes[row, col].imshow(img.numpy(), cmap='gray')
+                axes[row, col].set_title(title)
+                axes[row, col].axis('off')
+                
+            plt.tight_layout()
+            
+            # Log to wandb
+            wandb.log({
+                f"sample_{i+1}_transformations": wandb.Image(fig),
+                "epoch": epoch + 1
+            })
+            
+            plt.close(fig)
+        
+        # Create a combined grid of all samples for overview
+        all_images = []
+        for i in range(min(4, mbod_sample.size(0))):
+            all_images.extend([
+                mbod_sample[i].cpu().squeeze(),
+                tb_sample[i].cpu().squeeze(),
+                fake_tb_img[i].cpu().squeeze(),
+                fake_mbod_img[i].cpu().squeeze(),
+                recov_mbod_img[i].cpu().squeeze(),
+                recov_tb_img[i].cpu().squeeze()
+            ])
+        
+        # Create grid figure
+        fig, axes = plt.subplots(min(4, mbod_sample.size(0)), 6, figsize=(18, 3*min(4, mbod_sample.size(0))))
+        if mbod_sample.size(0) == 1:
+            axes = [axes]  # Handle case when only one sample
+            
+        col_titles = ["MBOD Original", "TB Original", "MBOD→TB", "TB→MBOD", "MBOD→TB→MBOD", "TB→MBOD→TB"]
+        
+        # Add column titles
+        for j, title in enumerate(col_titles):
+            fig.text(j/6 + 1/(6*2), 0.02, title, ha='center')
+            
+        # Plot all images
+        for i, img in enumerate(all_images):
+            row, col = i // 6, i % 6
+            if mbod_sample.size(0) == 1:
+                axes[col].imshow(img.numpy(), cmap='gray')
+                axes[col].axis('off')
+            else:
+                axes[row, col].imshow(img.numpy(), cmap='gray')
+                axes[row, col].axis('off')
+        
+        plt.tight_layout()
+        
+        # Log the entire grid to wandb
+        wandb.log({
+            "transformation_grid": wandb.Image(fig),
+            "epoch": epoch + 1
+        })
+        
+        plt.close(fig)
+    
+    cycle_gan.train()
+
+
 def train_cyclegan(
     cycle_gan,
     vae_model,
@@ -104,7 +223,7 @@ def train_cyclegan(
     )
     optimizer_D = torch.optim.Adam(
         list(cycle_gan.discriminator_TB.parameters()) + list(cycle_gan.discriminator_MBOD.parameters()),
-        lr=lr,
+        lr=lr * 0.2,
         betas=(beta1, 0.999)
     )
     
@@ -123,6 +242,10 @@ def train_cyclegan(
     # Extract encoder and decoder from VAE
     ae = vae_model.model
     ae.eval()  # Keep VAE in eval mode
+    
+    # Get fixed samples for visualization
+    mbod_fixed_samples = next(iter(val_loader_mbod))[0].to(device)
+    tb_fixed_samples = next(iter(val_loader_tb))[0].to(device)
     
     # Training loop
     for epoch in range(num_epochs):
@@ -180,10 +303,11 @@ def train_cyclegan(
             mbod_imgs = mbod_imgs.to(device)
             tb_imgs = tb_imgs.to(device)
             
-            # Set real and fake labels
-            real_label = torch.ones(mbod_imgs.size(0), 1, 14, 14).to(device)  # Adjust size based on your discriminator output
-            fake_label = torch.zeros(mbod_imgs.size(0), 1, 14, 14).to(device)
-            
+            # Set real and fake labels (LABEL SMOOTHING)
+            real_label = torch.full((mbod_imgs.size(0), 1, 14, 14), 0.9).to(device)  # Smooth from 1.0 to 0.9
+            fake_label = torch.full((mbod_imgs.size(0), 1, 14, 14), 0.1).to(device)  # Smooth from 0.0 to 0.1
+
+
             # Encode images from both domains
             with torch.no_grad():
                 encoded_mbod = ae.encode(mbod_imgs).sample()
@@ -329,8 +453,7 @@ def train_cyclegan(
             "epoch_D_MBOD_loss": avg_d_mbod_loss,
             "disc_acc_real": disc_acc_real,
             "disc_acc_fake": disc_acc_fake,
-            "disc_acc_total": disc_acc_total,
-            "learning_rate": optimizer_G.param_groups[0]['lr']
+            "disc_acc_total": disc_acc_total
         })
         
         # Print epoch results
@@ -339,16 +462,17 @@ def train_cyclegan(
         print(f"Epoch {epoch+1} - Avg G_loss: {avg_g_loss:.4f}, Avg D_loss: {avg_d_loss:.4f}")
         print(f"Discriminator accuracy - Real: {disc_acc_real:.2f}%, Fake: {disc_acc_fake:.2f}%, Total: {disc_acc_total:.2f}%")
         
-        # Save sample images
+        # Save sample images and log to wandb
         if (epoch + 1) % sample_interval == 0:
+            # Use the fixed samples for consistent visualization
+            log_sample_images(cycle_gan, ae, mbod_fixed_samples, tb_fixed_samples, epoch, device)
+            
+            # Also create and save the traditional grid to disk
             cycle_gan.eval()
             with torch.no_grad():
                 # Get sample images from validation set
-                mbod_sample_batch = next(iter(val_loader_mbod))
-                tb_sample_batch = next(iter(val_loader_tb))
-                
-                mbod_sample = mbod_sample_batch[0].to(device)[:4]  # Take first 4 samples
-                tb_sample = tb_sample_batch[0].to(device)[:4]  # Take first 4 samples
+                mbod_sample = mbod_fixed_samples[:4]  # Take first 4 samples
+                tb_sample = tb_fixed_samples[:4]  # Take first 4 samples
                 
                 # Encode images
                 encoded_mbod = ae.encode(mbod_sample).sample()
@@ -464,14 +588,15 @@ if __name__ == "__main__":
 
 
         wandb.login()
-        wandb.init(project='MBOD-cyclegan', name='init_test',
+        wandb.init(project='MBOD-cyclegan', name='init_test-lbl_smoothing',
                    config={
                        "experiment_type:": "CycleGAN - Base",
                        "batch_size": 4,
                        "n_epochs": 100,
                        "learning_rate": 0.0002,
                        "beta1": 0.5,
-                       "lambda_cycle": 10.0,
+                       "lambda_cycle": 1.0,
+                       "backbone": "MedVAE"
                    })
 
 
@@ -641,7 +766,7 @@ if __name__ == "__main__":
             "Reconstructed Image in Domain MBOD"
         ]
 
-       #  plot_images(images, titles=titles, cols=2)
+        plot_images(images, titles=titles, cols=2)
 
 
         # Test the discriminators on encoded images
