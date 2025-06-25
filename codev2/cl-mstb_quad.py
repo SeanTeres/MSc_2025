@@ -424,10 +424,10 @@ def train_model_quadruplet(
         'val_prof_map': [],
         'train_quadruplet_loss': [],
         'val_quadruplet_loss': [],
-        'train_sensitivity': [],  # Add these new keys
-        'val_sensitivity': [],
-        'train_class_sensitivity': [],
-        'val_class_sensitivity': []
+        'train_specificity': [],  # Add these new keys
+        'val_specificity': [],
+        'train_class_specificity': [],
+        'val_class_specificity': []
     }
     
     # Initialize class-specific metrics
@@ -713,20 +713,12 @@ def train_model_quadruplet(
                 # Store per-class metrics
                 per_class_metrics[class_id]['train_ap'].append(ap)
 
-            # Calculate sensitivity at specificity
-            train_sensitivity, train_class_sensitivity = helpers.compute_sensitivity_at_specificity(
-                all_embeddings, all_labels, specificity_target=0.70)
-
-            print(f"Train Sensitivity@0.95Specificity: {train_sensitivity:.4f}")
-            print("- Per-Class Train Sensitivity@0.95Specificity:")
-            for class_id in range(num_classes):
-                sensitivity = train_class_sensitivity.get(class_id, 0.0)
-                class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
-                print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
-
+            
+            train_specificity, train_class_specificity = helpers.compute_specificity_at_sensitivity(
+                all_embeddings, all_labels, sensitivity_target=0.90)            
             # Update history
-            history['train_sensitivity'].append(train_sensitivity)
-            history['train_class_sensitivity'].append(train_class_sensitivity)
+            history['train_specificity'].append(train_specificity)
+            history['train_class_specificity'].append(train_class_specificity)
             history['train_loss'].append(train_loss)
             history['train_map'].append(train_map)
             history['train_class_map'].append(train_class_map_full)
@@ -773,8 +765,8 @@ def train_model_quadruplet(
         history['val_quadruplet_loss'].append(val_loss)
         
         # Update history with validation metrics
-        history['val_sensitivity'].append(val_metrics['val_sensitivity'])
-        history['val_class_sensitivity'].append(val_metrics['val_class_sensitivity'])
+        history['val_specificity'].append(val_metrics['val_specificity'])
+        history['val_class_specificity'].append(val_metrics['val_class_specificity'])
 
         # Log metrics to wandb
         if log_to_wandb:
@@ -790,16 +782,16 @@ def train_model_quadruplet(
                 "current_margin2": quadruplet_loss_fn.margin2,
                 "current_p_ilo_anchor": p_ilo_anchor if wandb.config.p_ilo_scheduling else wandb.config.p_ilo_anchor,
                 "train_quadruplets": epoch_quadruplet_count,
-                "train_sens@spec": train_sensitivity if epoch_batch_count > 0 else 0.0,  # Add this
-                "val_sens@spec": val_metrics['val_sensitivity']  # Add this
+                "train_spec@sens": train_specificity if epoch_batch_count > 0 else 0.0,  # Add this
+                "val_spec@sens": val_metrics['val_specificity']  # Add this
             }
 
             # Add per-class metrics for both mAP and sensitivity
             for class_id in range(num_classes):
                 train_ap = train_class_map_full.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
                 val_ap = val_class_map.get(class_id, 0.0)
-                train_sens = train_class_sensitivity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
-                val_sens = val_metrics['val_class_sensitivity'].get(class_id, 0.0)
+                train_sens = train_class_specificity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_sens = val_metrics['val_class_specificity'].get(class_id, 0.0)
                 
                 wandb_log_dict[f"train_class_{class_id}_map"] = train_ap
                 wandb_log_dict[f"val_class_{class_id}_map"] = val_ap
@@ -1047,15 +1039,15 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
         })
         
         # Calculate sensitivity at specificity
-        val_sensitivity, val_class_sensitivity = helpers.compute_sensitivity_at_specificity(
-            all_embeddings, all_labels, specificity_target=0.70)
+        val_specificity, val_class_specificity = helpers.compute_specificity_at_sensitivity(
+            all_embeddings, all_labels, sensitivity_target=0.90)
 
-        print(f"- Validation Sensitivity@0.95Specificity: {val_sensitivity:.4f}")
-        print("- Per-Class Validation Sensitivity@0.95Specificity:")
+        print(f"- Validation Specificity@0.90Sensitivity: {val_specificity:.4f}")
+        print("- Per-Class Validation Specificity@0.90Sensitivity:")
         for class_id in range(num_classes):
-            sensitivity = val_class_sensitivity.get(class_id, 0.0)
+            sensitivity = val_class_specificity.get(class_id, 0.0)
             class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
-            print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
+            print(f"  {class_name}: Specificity = {sensitivity:.4f}")
 
         # Return the sensitivity metrics with the other validation metrics
         return {
@@ -1067,8 +1059,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
             'val_prof_class_map': val_prof_class_map,
             'val_embeddings': all_embeddings,
             'val_labels': all_labels,
-            'val_sensitivity': val_sensitivity,
-            'val_class_sensitivity': val_class_sensitivity  # Add this
+            'val_specificity': val_specificity,
+            'val_class_specificity': val_class_specificity  # Add this
         }
             
     # Return empty metrics if no quadruplets were formed
@@ -1135,21 +1127,21 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-2', name='mstb_quad_dbl_triplet',
+        wandb.init(project='MBOD-cl-2', name='mstb_quad_RNR-long',
             config={
-                "experiment_type": "Quadruplet (Double Triplet)",
+                "experiment_type": "Quadruplet (RNR)",
                 "prioritize_prof_n1": True,  # Prioritize highest profusion difference for N1 samples
                 "beta_factor": 0.25,
                 "dataset": "MBOD ONLY",
                 "labeling_scheme": "MSTB",
                 "batch_size": 24,
-                "n_epochs": 1000,
+                "n_epochs": 2000,
                 "learning_rate": 1e-4,
                 "oversample": True,
                 "initial_margin": 0.05,      
                 "final_margin": 0.4,        
                 "margin_scheduling": True,   # Enable margin scheduling
-                "scheduling_fraction": 0.75,  # Complete scheduling in first x% of training
+                "scheduling_fraction": 0.9,  # Complete scheduling in first x% of training
                 "mining": "BSHN-v2",
                 "augmentations": True,
                 "filtered_dataset": True,

@@ -317,7 +317,34 @@ def calculate_margin_violations(anchor_embedding, positive_embedding, negative_e
     
     return is_violated.item(), violation_amount.item()
 
-
+def can_form_quadruplets(batch_labels):
+    """Check if batch can form valid quadruplets"""
+    label_counts = np.bincount(batch_labels, minlength=8)
+    
+    # Check for anchor-positive pairs
+    has_anchor_positive = False
+    for label in range(8):
+        if label_counts[label] >= 2:
+            has_anchor_positive = True
+            break
+    
+    if not has_anchor_positive:
+        return False
+    
+    # Check for different profusion scores for BSHN-v2
+    profusion_counts = np.zeros(4)
+    for i in range(4):
+        profusion_counts[i] = label_counts[i] + label_counts[i+4]
+    
+    if sum(1 for count in profusion_counts if count > 0) < 2:
+        return False
+    
+    # Check for TB+/TB- pairs
+    for prof in range(4):
+        if label_counts[prof] > 0 and label_counts[prof+4] > 0:
+            return True
+    
+    return False
 
 def train_model_quadruplet(
     model,
@@ -430,10 +457,10 @@ def train_model_quadruplet(
         'val_prof_map': [],
         'train_quadruplet_loss': [],
         'val_quadruplet_loss': [],
-        'train_sensitivity': [],  # Add these new keys
-        'val_sensitivity': [],
-        'train_class_sensitivity': [],
-        'val_class_sensitivity': []
+        'train_specificity': [],  # Add these new keys
+        'val_specificity': [],
+        'train_class_specificity': [],
+        'val_class_specificity': []
     }
     
     # Initialize class-specific metrics
@@ -487,6 +514,8 @@ def train_model_quadruplet(
             all_labels.append(labels.detach().cpu())
             
             current_batch_labels = labels.cpu().numpy()
+
+
             
             # Collect quadruplet components
             anchors = []
@@ -499,6 +528,18 @@ def train_model_quadruplet(
             batch_prof_pos_anchors = 0
             n_ilo_anchors = 0
             
+                        # Add early check before computing features
+            if not can_form_quadruplets(current_batch_labels):
+                print(f"Batch {batch_idx + 1} cannot form valid quadruplets. Skipping early.")
+                print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
+
+                batch_quadruplet_count += 0
+
+                del imgs, feats, embeddings, labels  # Free memory
+                gc.collect()  # Force garbage collection
+                torch.cuda.empty_cache()  # Clear CUDA memory
+                continue  # Skip to next batch without allocating any more tensors
+
             # For each sample in the batch, build a quadruplet
             for i, positive_label in enumerate(current_batch_labels):
                 positive_embedding = embeddings[i].unsqueeze(0)
@@ -624,6 +665,16 @@ def train_model_quadruplet(
                         
                         else:
                             batch_quadruplet_count += 0
+                            
+                            # Clean up tensors from this specific quadruplet formation attempt
+                            del positive_embedding
+                            if 'anchor_embedding' in locals(): del anchor_embedding
+                            if 'negative_embeddings' in locals(): del negative_embeddings
+                            if 'anchor_repeated' in locals(): del anchor_repeated
+                            if 'dists' in locals(): del dists
+                            if 'semi_hard_mask' in locals(): del semi_hard_mask
+                            if 'semi_hard_dists' in locals(): del semi_hard_dists
+    
 
             # Process collected quadruplets
             if batch_quadruplet_count > 0:
@@ -663,8 +714,7 @@ def train_model_quadruplet(
 
                     })
             else:
-                print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
-                print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
+                print(f"FUNCTION TO CHECK DIDNT WORK: Batch {batch_idx + 1} cannot form valid quadruplets. Skipping.")
                 del embeddings, feats, imgs, labels, positive_embedding, negative_embeddings, anchor_embedding, dists, semi_hard_mask, semi_hard_dists
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -699,19 +749,14 @@ def train_model_quadruplet(
                 per_class_metrics[class_id]['train_ap'].append(ap)
 
             # Calculate sensitivity at specificity
-            train_sensitivity, train_class_sensitivity = helpers.compute_sensitivity_at_specificity(
-                all_embeddings, all_labels, specificity_target=0.70)
+            train_specificity, train_class_specificity = helpers.compute_specificity_at_sensitivity(
+                all_embeddings, all_labels, specificity_target=0.90)
 
-            print(f"Train Sensitivity@0.95Specificity: {train_sensitivity:.4f}")
-            print("- Per-Class Train Sensitivity@0.95Specificity:")
-            for class_id in range(num_classes):
-                sensitivity = train_class_sensitivity.get(class_id, 0.0)
-                class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
-                print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
+            print(f"Train Sensitivity@0.95Specificity: {train_specificity:.4f}")
 
             # Update history
-            history['train_sensitivity'].append(train_sensitivity)
-            history['train_class_sensitivity'].append(train_class_sensitivity)
+            history['train_specificity'].append(train_specificity)
+            history['train_class_specificity'].append(train_class_specificity)
             history['train_loss'].append(train_loss)
             history['train_map'].append(train_map)
             history['train_class_map'].append(train_class_map_full)
@@ -758,8 +803,8 @@ def train_model_quadruplet(
         history['val_quadruplet_loss'].append(val_loss)
         
         # Update history with validation metrics
-        history['val_sensitivity'].append(val_metrics['val_sensitivity'])
-        history['val_class_sensitivity'].append(val_metrics['val_class_sensitivity'])
+        history['val_specificity'].append(val_metrics['val_specificity'])
+        history['val_class_specificity'].append(val_metrics['val_class_specificity'])
 
         # Log metrics to wandb
         if log_to_wandb:
@@ -775,16 +820,16 @@ def train_model_quadruplet(
                 "current_margin2": quadruplet_loss_fn.margin2,
                 "current_p_ilo_anchor": p_ilo_anchor if wandb.config.p_ilo_scheduling else wandb.config.p_ilo_anchor,
                 "train_quadruplets": epoch_quadruplet_count,
-                "train_sens@spec": train_sensitivity if epoch_batch_count > 0 else 0.0,  # Add this
-                "val_sens@spec": val_metrics['val_sensitivity']  # Add this
+                "train_spec@sens": train_specificity if epoch_batch_count > 0 else 0.0,  # Add this
+                "val_spec@sens": val_metrics['val_specificity']  # Add this
             }
 
             # Add per-class metrics for both mAP and sensitivity
             for class_id in range(num_classes):
                 train_ap = train_class_map_full.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
                 val_ap = val_class_map.get(class_id, 0.0)
-                train_sens = train_class_sensitivity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
-                val_sens = val_metrics['val_class_sensitivity'].get(class_id, 0.0)
+                train_sens = train_class_specificity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_sens = val_metrics['val_class_specificity'].get(class_id, 0.0)
                 
                 wandb_log_dict[f"train_class_{class_id}_map"] = train_ap
                 wandb_log_dict[f"val_class_{class_id}_map"] = val_ap
@@ -1034,15 +1079,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
         })
         
         # Calculate sensitivity at specificity
-        val_sensitivity, val_class_sensitivity = helpers.compute_sensitivity_at_specificity(
-            all_embeddings, all_labels, specificity_target=0.70)
-
-        print(f"- Validation Sensitivity@0.95Specificity: {val_sensitivity:.4f}")
-        print("- Per-Class Validation Sensitivity@0.95Specificity:")
-        for class_id in range(num_classes):
-            sensitivity = val_class_sensitivity.get(class_id, 0.0)
-            class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
-            print(f"  {class_name}: Sensitivity = {sensitivity:.4f}")
+        val_specificity, val_class_specificity = helpers.compute_specificity_at_sensitivity(
+            all_embeddings, all_labels, specificity_target=0.90)
 
         # Return the sensitivity metrics with the other validation metrics
         return {
@@ -1054,8 +1092,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
             'val_prof_class_map': val_prof_class_map,
             'val_embeddings': all_embeddings,
             'val_labels': all_labels,
-            'val_sensitivity': val_sensitivity,
-            'val_class_sensitivity': val_class_sensitivity  # Add this
+            'val_specificity': val_specificity,
+            'val_class_specificity': val_class_specificity  # Add this
         }
             
     # Return empty metrics if no quadruplets were formed
@@ -1124,7 +1162,7 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-TB_Net_pos-p_ilo_07_03',
+        wandb.init(project='MBOD-cl-2', name='mstb_quad_TNR-TB_Net_pos-strong_OS-m_005_03',
             config={
                 "experiment_type": "Quadruplet (TNR)",
                 "beta_factor": 0.25,
@@ -1135,7 +1173,7 @@ if __name__ == "__main__":
                 "learning_rate": 1e-4,
                 "oversample": True,
                 "initial_margin": 0.05,      
-                "final_margin": 0.4,        
+                "final_margin": 0.3,        
                 "margin_scheduling": True,   # Enable margin scheduling
                 "scheduling_fraction": 0.90,  # Complete scheduling in first x% of training
                 "mining": "BSHN-v2",
@@ -1145,7 +1183,7 @@ if __name__ == "__main__":
                 "p_ilo_anchor": 0.7,
                 "p_ilo_final": 0.3,
                 "num_classes": 8,  # Explicitly specify 8 classes
-                "OS_factor": 0.75,  # Oversampling factor
+                "OS_factor": 0.9,  # Oversampling factor
                 "p_ilo_scheduling": True,  # Enable p_ilo scheduling
             })
 
