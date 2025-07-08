@@ -1,0 +1,1407 @@
+import sys
+import os
+import gc
+from typing import List
+# Add mbod-data-processor to the Python path
+sys.path.append(os.path.abspath("../mbod-data-processor"))
+
+from datasets.hdf_dataset import HDF5Dataset
+from utils import LABEL_SCHEMES, load_config
+from data_splits import stratify, get_label_scheme_supports
+import numpy as np
+import matplotlib.pyplot as plt
+import h5py
+from datasets.dataloader import get_dataloaders
+import torchxrayvision as xrv
+import torch
+from train_utils import classes, helpers
+import torch.nn.functional as F
+import torch.nn as nn
+import wandb
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, recall_score, f1_score, precision_score, cohen_kappa_score, roc_auc_score
+import seaborn as sns
+from sklearn.calibration import calibration_curve
+import io
+import torchvision.transforms as transforms
+import os
+from tsne import visualize_tsne
+import math
+import random
+from pytorch_metric_learning.distances import CosineSimilarity
+from pytorch_metric_learning.reducers import ThresholdReducer
+from pytorch_metric_learning.regularizers import LpRegularizer
+from pytorch_metric_learning import losses, miners
+
+import torch
+from torch import nn, Tensor
+import torch.nn.functional as F
+from clf_manager import BinaryClassifier, MulticlassClassifier
+# Add after the existing imports at the top
+from sklearn.metrics import roc_auc_score
+
+def calculate_classification_metrics(predictions, labels, task_type="multiclass"):
+    """
+    Calculate comprehensive classification metrics
+    
+    Args:
+        predictions: Model predictions (logits)
+        labels: True labels
+        task_type: "binary" or "multiclass"
+    
+    Returns:
+        Dictionary of metrics
+    """
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.detach().cpu()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu()
+    
+    metrics = {}
+    
+    if task_type == "binary":
+        # Binary classification
+        probs = torch.sigmoid(predictions.squeeze()).numpy()
+        pred_classes = (probs > 0.5).astype(int)
+        labels_np = labels.numpy()
+        
+        # Basic metrics
+        metrics['accuracy'] = accuracy_score(labels_np, pred_classes)
+        metrics['f1'] = f1_score(labels_np, pred_classes, zero_division=0)
+        metrics['precision'] = precision_score(labels_np, pred_classes, zero_division=0)
+        metrics['recall'] = recall_score(labels_np, pred_classes, zero_division=0)
+        metrics['kappa'] = cohen_kappa_score(labels_np, pred_classes)
+        
+        # AUC (using probabilities)
+        try:
+            metrics['auc'] = roc_auc_score(labels_np, probs)
+        except:
+            metrics['auc'] = 0.0
+        
+        # Specificity
+        try:
+            cm = confusion_matrix(labels_np, pred_classes)
+            if cm.shape == (2, 2):
+                tn, fp, fn, tp = cm.ravel()
+                metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            else:
+                metrics['specificity'] = 0.0
+        except:
+            metrics['specificity'] = 0.0
+    
+    else:
+        # Multiclass classification
+        if predictions.dim() > 1:
+            pred_classes = torch.argmax(predictions, dim=1).numpy()
+            probs = torch.softmax(predictions, dim=1).numpy()
+        else:
+            pred_classes = predictions.numpy()
+            probs = None
+        
+        labels_np = labels.numpy()
+        
+        # Basic metrics
+        metrics['accuracy'] = accuracy_score(labels_np, pred_classes)
+        metrics['f1'] = f1_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['precision'] = precision_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['recall'] = recall_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['kappa'] = cohen_kappa_score(labels_np, pred_classes)
+        
+        # AUC (multiclass)
+        try:
+            if probs is not None:
+                metrics['auc'] = roc_auc_score(labels_np, probs, multi_class='ovr', average='weighted')
+            else:
+                metrics['auc'] = 0.0
+        except:
+            metrics['auc'] = 0.0
+        
+        # Specificity (macro average for multiclass)
+        try:
+            cm = confusion_matrix(labels_np, pred_classes)
+            n_classes = cm.shape[0]
+            
+            specificities = []
+            for i in range(n_classes):
+                tp = cm[i, i]
+                fn = cm[i, :].sum() - tp
+                fp = cm[:, i].sum() - tp
+                tn = cm.sum() - tp - fn - fp
+                
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                specificities.append(specificity)
+            
+            metrics['specificity'] = np.mean(specificities)
+        except:
+            metrics['specificity'] = 0.0
+    
+    return metrics
+
+def print_dataloader_label_distribution(dataloader, label_mapping=None, wrapped=False):
+    """
+    Print the distribution of labels in a dataloader
+    
+    Args:
+        dataloader: PyTorch dataloader
+        label_mapping: Optional dict mapping label indices to human-readable names
+    """
+    label_counts = {}
+    
+    # Collect all labels
+    if not wrapped:
+        all_labels = []
+        for _, labels in dataloader:
+            if isinstance(labels, torch.Tensor):
+                batch_labels = labels.cpu().numpy()
+            else:
+                batch_labels = np.array(labels)
+                
+            if len(batch_labels.shape) > 1:
+                # For multi-label case, take argmax
+                batch_labels = np.argmax(batch_labels, axis=1)
+                
+            all_labels.extend(batch_labels)
+        
+        # Count occurrences
+        unique_labels, counts = np.unique(all_labels, return_counts=True)
+        
+        # Print distribution
+        total_samples = len(all_labels)
+        print(f"Total samples: {total_samples}")
+        print("Label distribution:")
+        
+        for label, count in zip(unique_labels, counts):
+            percentage = (count / total_samples) * 100
+            if label_mapping and label in label_mapping:
+                label_name = f"{label} ({label_mapping[label]})"
+            else:
+                label_name = str(label)
+            
+            print(f"  {label_name}: {count} samples ({percentage:.2f}%)")
+    else:
+        all_labels = []
+        for _, labels in dataloader:
+            if isinstance(labels, torch.Tensor):
+                batch_labels = labels.cpu().numpy()
+            else:
+                batch_labels = np.array(labels)
+                
+            if len(batch_labels.shape) > 1:
+                # For multi-label case, take argmax
+                batch_labels = np.argmax(batch_labels, axis=1)
+                
+            all_labels.extend(batch_labels)
+        
+        # Count occurrences
+        unique_labels, counts = np.unique(all_labels, return_counts=True)
+        
+        # Print distribution
+        total_samples = len(all_labels)
+        print(f"Total samples: {total_samples}")
+        print("Label distribution:")
+        
+        for label, count in zip(unique_labels, counts):
+            percentage = (count / total_samples) * 100
+            if label_mapping and label in label_mapping:
+                label_name = f"{label} ({label_mapping[label]})"
+            else:
+                label_name = str(label)
+            
+            print(f"  {label_name}: {count} samples ({percentage:.2f}%)")
+
+
+class QuadrupletMarginLoss(nn.modules.loss._Loss):
+    __constants__ = ['margin1', 'margin2', 'p', 'eps', 'swap', 'reduction']
+    margin1: float
+    margin2: float
+    p: float
+    eps: float
+    swap: bool
+
+    def __init__(self,
+                 margin1: float = 1.0,
+                 margin2: float = 1.0,
+                 p: float = 2.,
+                 eps: float = 1e-6,
+                 swap: bool = False,
+                 type: str = 'DoubleTriplet',  # 'DoubleTriplet' or 'Original'
+                 size_average=None,
+                 reduce=None,
+                 reduction: str = 'mean',
+                 mask_ilo_tb: bool = False):
+        super().__init__(size_average, reduce, reduction)
+        self.margin1 = margin1
+        self.margin2 = margin2
+        self.p = p
+        self.eps = eps
+        self.swap = swap
+        self.reduction = reduction
+        assert type in ['DoubleTriplet', 'Original', 'TieredNegativeRanking', 'RelativeNegativeRanking']
+        self.type = type
+        self.mask_ilo_tb = mask_ilo_tb
+
+    def forward(self, anchor: Tensor, positive: Tensor, negative1: Tensor, negative2: Tensor, 
+                is_ilo_anchor: Tensor = None) -> Tensor:
+        
+        d_ap = torch.norm(anchor - positive, p=self.p, dim=1)
+        d_an1 = torch.norm(anchor - negative1, p=self.p, dim=1)
+        d_an2 = torch.norm(anchor - negative2, p=self.p, dim=1)
+        d_n1n2 = torch.norm(negative1 - negative2, p=self.p, dim=1)
+        
+        # First term: standard triplet
+        loss1 = F.triplet_margin_loss(anchor, positive, negative1,
+                                      margin=self.margin1,
+                                      p=self.p,
+                                      eps=self.eps,
+                                      swap=self.swap,
+                                      reduction='none')
+
+        if self.type == 'DoubleTriplet':
+            # Second term: second negative pushed from anchor
+            loss2 = F.triplet_margin_loss(anchor, positive, negative2,
+                                          margin=self.margin2,
+                                          p=self.p,
+                                          eps=self.eps,
+                                          swap=self.swap,
+                                          reduction='none')
+            
+            # Apply masking if is_ilo_anchor provided
+            if is_ilo_anchor is not None and self.mask_ilo_tb:
+                # Zero out loss2 for ILO anchors (memory efficient - no additional tensors created)
+                mask = (~is_ilo_anchor).float()
+                loss2 = loss2 * mask
+
+
+        elif self.type == 'Original':
+            # Second term: negative2 pushed from negative1
+            # Use D(N1, N2) instead of D(A, N2)
+            d_ap = torch.norm(anchor - positive, p=self.p, dim=1)
+            d_n1n2 = torch.norm(negative1 - negative2, p=self.p, dim=1)
+            loss2 = torch.clamp(d_ap - d_n1n2 + self.margin2, min=0.0)
+
+        elif self.type == 'TieredNegativeRanking':
+        # First term: standard triplet loss (anchor-positive vs anchor-negative1)
+            loss1 = torch.clamp(d_ap - d_an1 + self.margin1, min=0.0)
+            
+            # Second term: negative2 vs negative1 from anchor perspective
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)
+        
+            
+        elif self.type == 'RelativeNegativeRanking':
+        # First term: standard triplet loss (anchor-positive vs anchor-negative1)
+            loss1 = torch.clamp(d_ap - d_an2 + self.margin1, min=0.0)
+            
+            # Second term: negative2 vs negative1 from anchor perspective
+            loss2 = torch.clamp(d_an2 - d_an1 + self.margin2, min=0.0)
+      
+
+        # Combine terms and apply reduction
+        loss = loss1 + loss2
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+def build_label_to_indices_map(dataset):
+    """
+    Create a dictionary mapping each label to all indices with that label in the dataset.
+    
+    Args:
+        dataset: PyTorch dataset with labels accessible via dataset[idx][1]
+        
+    Returns:
+        Dictionary mapping label values to lists of indices
+    """
+    label_to_indices = {}
+    
+    for idx in range(len(dataset)):
+        _, label = dataset[idx]
+        if isinstance(label, torch.Tensor):
+            label = label.item()
+            
+        if label not in label_to_indices:
+            label_to_indices[label] = []
+        label_to_indices[label].append(idx)
+       
+        
+    return label_to_indices
+
+
+def calculate_margin_violations(anchor_embedding, positive_embedding, negative_embedding, margin):
+    """
+    Calculate if a triplet violates the margin constraint.
+    
+    A triplet (A,P,N) violates the margin if:
+    d(A,P) > d(A,N) - margin
+    
+    Args:
+        anchor_embedding: Embedding of the anchor sample
+        positive_embedding: Embedding of the positive sample
+        negative_embedding: Embedding of the negative sample
+        margin: The margin value to enforce
+        
+    Returns:
+        is_violated: Boolean indicating if the margin is violated
+        violation_amount: How much the constraint is violated by (if positive)
+    """
+    # Calculate distances
+    dist_ap = F.pairwise_distance(anchor_embedding, positive_embedding)
+    dist_an = F.pairwise_distance(anchor_embedding, negative_embedding)
+    
+    # Check violation
+    violation_amount = dist_ap - (dist_an - margin)
+    is_violated = violation_amount > 0
+    
+    return is_violated.item(), violation_amount.item()
+
+
+
+def train_model_quadruplet(
+    model,
+    train_loader,
+    val_loader,
+    triplet_loss_fn,
+    quadruplet_loss_fn,
+    clf_loss_fn,
+    encoder_optimizer,
+    classifier_optimizer,
+    device,
+    n_epochs,
+    experiment_name,
+    ilo_dataset,
+    mbod_merged_loader,
+    active_classifiers=None,
+    checkpoint_dir="checkpoints",
+    tsne_interval=50,
+    log_to_wandb=True,
+    mining_strat="BSHN-v2",
+    margin_scheduling=False,
+    initial_margin=0.8,
+    final_margin=0.2,
+    scheduling_fraction=0.8,
+    p_ilo_anchor=0.5,
+    lambda_clf=0.25
+):
+    """
+    Trains a model using quadruplet loss for multi-label tasks like 
+    simultaneous pneumoconiosis and TB classification.
+    
+    Args:
+        model: PyTorch model to train
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+        triplet_loss_fn: Standard triplet loss function for comparison
+        quadruplet_loss_fn: Quadruplet loss function
+        optimizer: Optimizer for model parameter updates
+        device: Device to run training on (cuda/cpu)
+        n_epochs: Number of training epochs
+        experiment_name: Name for saving checkpoints
+        checkpoint_dir: Directory to save checkpoints
+        tsne_interval: How often to run t-SNE visualization
+        log_to_wandb: Whether to log metrics to wandb
+        mining_strat: Mining strategy for finding negatives
+        margin_scheduling: Enable/disable margin scheduling
+        initial_margin: Initial margin value
+        final_margin: Final margin value
+        scheduling_fraction: Fraction of training to complete schedule
+        
+    Returns:
+        dict: Dictionary containing trained model, best model state dict,
+              training history and best validation metrics
+    """
+    # Define the mapping for multiclass_stb
+    multiclass_stb_mapping = {
+        0: "Profusion 0, No TB",
+        1: "Profusion 1, No TB",
+        2: "Profusion 2, No TB",
+        3: "Profusion 3, No TB",
+        4: "Profusion 0, With TB",
+        5: "Profusion 1, With TB",
+        6: "Profusion 2, With TB",
+        7: "Profusion 3, With TB",
+    }
+    torch.manual_seed(wandb.config.get('seed', 42))
+    np.random.seed(wandb.config.get('seed', 42))
+    # Create label-to-indices map for finding appropriate anchors
+    labels_to_indices = build_label_to_indices_map(train_loader.dataset.dataset)
+    ilo_images = []
+    ilo_labels = []
+
+    for idx in range(len(ilo_dataset)):
+        image, label = ilo_dataset[idx]
+        
+        # Convert image to a PyTorch tensor and move to GPU
+        image_tensor = torch.tensor(np.array(image), dtype=torch.float32).unsqueeze(0).to(device)
+        label_tensor = torch.tensor(label, dtype=torch.long).to(device)
+
+        ilo_images.append(image_tensor)
+        ilo_labels.append(label_tensor)
+
+    # Stack all tensors into a single tensor for efficient access
+    ilo_images = torch.cat(ilo_images, dim=0)  # Shape: (N, 1, H, W)
+    ilo_labels = torch.stack(ilo_labels)       # Shape: (N,)
+
+
+
+    # Margin scheduling functions
+    def get_sin_scheduled_margin(current_epoch):
+        if not margin_scheduling:
+            return triplet_loss_fn.margin
+        
+        schedule_point = min(1.0, current_epoch / (n_epochs * scheduling_fraction))
+        sin_factor = math.sin(schedule_point * math.pi/2)
+        
+        if initial_margin > final_margin:
+            current_margin = initial_margin - (initial_margin - final_margin) * sin_factor
+        else:
+            current_margin = initial_margin + (final_margin - initial_margin) * sin_factor
+            
+        return current_margin
+    
+    def get_scheduled_p_ilo(current_epoch, initial_p_ilo_anchor, n_epochs, scheduling_fraction):
+        """
+        Calculate the scheduled probability of using ILO anchors.
+        Starts at initial_p_ilo_anchor and decays to p_ilo_final over the first 
+        scheduling_fraction portion of training.
+        """
+        # Calculate what fraction of the scheduling period we've completed
+        schedule_end_epoch = n_epochs * scheduling_fraction
+        schedule_point = min(1.0, current_epoch / schedule_end_epoch)
+        sin_factor = math.sin(schedule_point * math.pi/2)
+
+        # Calculate new probability
+        new_p_ilo_anchor = initial_p_ilo_anchor - (initial_p_ilo_anchor - wandb.config.p_ilo_final) * sin_factor
+        return new_p_ilo_anchor
+
+    # Create checkpoint directory
+    checkpoint_dir = os.path.join(checkpoint_dir, experiment_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Tracking metrics
+    num_classes = 8  # For multiclass_stb
+    best_val_map = 0.0
+    best_model_state = None
+    history = {
+        'train_loss': [],
+        'train_map': [],
+        'val_loss': [],
+        'val_map': [],
+        'train_class_map': [],
+        'val_class_map': [],
+        'train_prof_map': [],
+        'val_prof_map': [],
+        'train_quadruplet_loss': [],
+        'val_quadruplet_loss': [],
+        'train_specificity': [],  # Add these new keys
+        'val_specificity': [],
+        'train_class_specificity': [],
+        'val_class_specificity': []
+    }
+    
+    # Initialize class-specific metrics
+    per_class_metrics = {class_id: {'train_ap': [], 'val_ap': []} for class_id in range(num_classes)}
+
+    print("\n")
+    print("***"*50)
+    print("\n")
+
+    print_dataloader_label_distribution(train_loader, label_mapping=multiclass_stb_mapping)
+
+    print("\n")
+    print("***"*50)
+    print("\n")
+
+    # Create shared optimizer
+    shared_optimizer = torch.optim.Adam(
+        model.parameters(), 
+        lr=wandb.config.learning_rate, 
+        weight_decay=1e-5
+    )
+
+    for epoch in range(n_epochs):
+        print(f"Epoch {epoch + 1}/{n_epochs}")
+        print("=" * 50)
+
+        # Apply margin scheduling if enabled
+        if margin_scheduling:
+            current_margin = get_sin_scheduled_margin(epoch)
+            triplet_loss_fn.margin = current_margin
+            quadruplet_loss_fn.margin1 = current_margin
+            quadruplet_loss_fn.margin2 = current_margin * 0.25
+            #print(f"Current margins: {current_margin:.4f}, {quadruplet_loss_fn.margin2:.4f}")
+
+        if(wandb.config.p_ilo_scheduling):
+            p_ilo_anchor = get_scheduled_p_ilo(epoch, wandb.config.p_ilo_anchor, n_epochs, wandb.config.scheduling_fraction)
+        
+        model.train()
+        epoch_total_loss = 0.0
+        epoch_quad_loss = 0.0
+        epoch_clf_loss = 0.0
+
+        epoch_batch_count = 0
+        epoch_quadruplet_count = 0
+
+        all_embeddings = []
+        all_labels = []
+        
+        # Training loop
+        for batch_idx, sample in enumerate(train_loader):
+            # Zero gradients for this batch
+            shared_optimizer.zero_grad()
+            
+            imgs = sample[0].to(device)
+            labels = sample[1].to(device)
+            
+            feats = model.features(imgs)
+            embeddings = F.normalize(feats, p=2, dim=1)
+            
+            # Track embeddings and labels for mAP calculation
+            all_embeddings.append(embeddings.detach().cpu())
+            all_labels.append(labels.detach().cpu())
+            
+            current_batch_labels = labels.cpu().numpy()
+            
+            # Collect quadruplet components
+            anchors = []
+            positives = []
+            negatives = []
+            negatives_2 = []
+            batch_quadruplet_count = 0
+            batch_prof_0_anchors = 0
+            batch_prof_pos_anchors = 0
+            batch_prof_prioritized_negative_1 = 0
+            n_ilo_anchors = 0
+
+            is_ilo_flags = []
+            
+
+            # For each sample in the batch, build a quadruplet
+            for i, positive_label in enumerate(current_batch_labels):
+                positive_embedding = embeddings[i].unsqueeze(0)
+
+                if np.random.rand() < p_ilo_anchor:                        
+                    # Find ILO anchors with the same label as the positive sample
+                    ilo_indices = torch.where(ilo_labels == (positive_label % 4))[0]
+                    if len(ilo_indices) > 0:
+                        # Randomly select an ILO anchor
+                        ilo_idx = np.random.choice(ilo_indices.cpu().numpy())
+                        anchor_embedding = ilo_images[ilo_idx].unsqueeze(0)  # shape [1, C]
+                        anchor_embedding = model.features(anchor_embedding)  # Get features of the anchor
+                        anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
+                        anchor_label = ilo_labels[ilo_idx].item()  # Get the label of the anchor
+
+                        n_ilo_anchors += 1
+                        current_is_ilo = True
+
+                        if(anchor_label % 4 > 0):
+                            batch_prof_0_anchors += 0
+                            batch_prof_pos_anchors += 1
+                        else:
+                            batch_prof_0_anchors += 1
+                            batch_prof_pos_anchors += 0
+                else:
+                    current_is_ilo = False
+                    # Find anchor with same label
+                    batch_matching_indices = [j for j in range(len(current_batch_labels)) 
+                                            if current_batch_labels[j] == positive_label and j != i]
+                    
+                    if batch_matching_indices:
+                        # Found matching label in batch
+                        batch_anchor_idx = np.random.choice(batch_matching_indices)
+                        anchor_embedding = embeddings[batch_anchor_idx].unsqueeze(0)
+                        anchor_label = current_batch_labels[batch_anchor_idx]
+
+                    else:
+                        # Try finding matching sample in dataset
+                        matching_indices = labels_to_indices.get(positive_label.item(), [])
+                        if i in matching_indices:
+                            matching_indices.remove(i)
+                        
+                        if matching_indices:
+                            chosen_index = np.random.choice(matching_indices)
+                            anchor_img, anchor_label = train_loader.dataset.dataset[chosen_index]
+                            anchor_img = anchor_img.unsqueeze(0).to(device)
+                            anchor_embedding = model.features(anchor_img)
+                            anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
+
+                            if(anchor_label % 4 > 0):
+                                batch_prof_0_anchors += 0
+                                batch_prof_pos_anchors += 1
+                            else:
+                                batch_prof_0_anchors += 1
+                                batch_prof_pos_anchors += 0
+
+                        else:
+                            # Skip if no matching anchor found
+                            continue
+                    
+                
+                # Find first negative using chosen mining strategy
+                if mining_strat == "BSHN-v2":
+                    # Look for negatives with different profusion score
+                    prof_pos_score = positive_label % 4
+                    pos_tb_status = 1 if positive_label >= 4 else 0
+                    
+                    negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                      if label != positive_label and (label % 4) != prof_pos_score]
+                    
+                    if not negative_indices:
+                        # Fallback to any negative
+                        negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                          if label != positive_label]
+                        
+                if negative_indices:
+                    negative_embeddings = embeddings[negative_indices]
+                    anchor_repeated = anchor_embedding.repeat(negative_embeddings.size(0), 1)
+                    
+                    # Compute distances
+                    dists = F.pairwise_distance(anchor_repeated, negative_embeddings)
+                    positive_distance = F.pairwise_distance(anchor_embedding, positive_embedding)
+                    
+                    # Find semi-hard negatives
+                    semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + triplet_loss_fn.margin))
+                    semi_hard_dists = dists[semi_hard_mask]
+                    
+                    if semi_hard_dists.numel() > 0:
+                        # Use semi-hard negative
+                        hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
+                        semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
+                        selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
+
+
+                        if wandb.config.prioritize_prof_n1:
+                            # Prioritize BSHN negatives with highest difference in profusion
+                            semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
+                            neg_labels = [current_batch_labels[negative_indices[idx.item()]] for idx in semi_hard_indices]
+                            
+                            # Calculate profusion difference between each negative and anchor
+                            anchor_prof = anchor_label % 4
+                            prof_differences = np.array([abs((label % 4) - anchor_prof) for label in neg_labels])
+                            
+                            # Find the negative with highest profusion difference among semi-hard negatives
+                            if len(prof_differences) > 0:
+                                max_diff_idx = np.argmax(prof_differences)
+                                selected_neg_idx = semi_hard_indices[max_diff_idx].item()
+                            else:
+                                # Fallback to regular semi-hard selection when no profusion differences
+                                hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
+                                selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
+                                batch_prof_prioritized_negative_1 += 1
+
+                        negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
+                        negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
+                        
+                        # Find second negative with same profusion but different TB status
+                        negative_indices_2 = [j for j, label in enumerate(current_batch_labels) 
+                                           if (label % 4) == (negative_label % 4) and 
+                                              (int(label >= 4) != int(negative_label >= 4))]
+                        
+                        if negative_indices_2:
+                            neg_2_idx = np.random.choice(negative_indices_2)
+                            negative_embedding_2 = embeddings[neg_2_idx].unsqueeze(0)
+                            negative_label_2 = current_batch_labels[neg_2_idx]
+                            
+                            # Valid quadruplet found!
+                            anchors.append(anchor_embedding)
+                            positives.append(positive_embedding)
+                            negatives.append(negative_embedding)
+                            negatives_2.append(negative_embedding_2)
+                            is_ilo_flags.append(current_is_ilo)
+                            batch_quadruplet_count += 1
+
+
+                            
+                            # Log first quadruplet for debugging
+                            if batch_idx == 0 and len(anchors) == 1:
+                                print(f"Quadruplet example:")
+                                print(f"A: {anchor_label}, P: {positive_label}, N1: {negative_label}, N2: {negative_label_2}")
+                                print(f"A-Prof: {anchor_label % 4}, P-Prof: {positive_label % 4}, N1-Prof: {negative_label % 4}, N2-Prof: {negative_label_2 % 4}")
+                                print(f"A-TB: {anchor_label >= 4}, P-TB: {positive_label >= 4}, N1-TB: {negative_label >= 4}, N2-TB: {negative_label_2 >= 4}")
+                        
+                        else:
+                            batch_quadruplet_count += 0
+
+            # Process collected quadruplets
+            if batch_quadruplet_count > 0:
+                # Combine all quadruplet components
+                batch_anchors = torch.cat(anchors, dim=0)
+                batch_positives = torch.cat(positives, dim=0)
+                batch_negatives = torch.cat(negatives, dim=0)
+                batch_negatives_2 = torch.cat(negatives_2, dim=0)
+
+                is_ilo_anchor = torch.tensor(is_ilo_flags, dtype=torch.bool, device=device)
+
+                if(wandb.config.mask_ilo_tb):
+                    # Calculate batch loss using all quadruplets
+                    quad_loss = quadruplet_loss_fn(batch_anchors, batch_positives, batch_negatives, batch_negatives_2, is_ilo_anchor=is_ilo_anchor)
+                else:
+                    # Calculate batch loss using all quadruplets
+                    quad_loss = quadruplet_loss_fn(batch_anchors, batch_positives, batch_negatives, batch_negatives_2)
+                    
+                # For comparison/monitoring, calculate standard triplet loss
+                triplet_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
+
+                prof_labels = labels % 4
+                prof_preds = model.mc_prof_clf(embeddings)
+                clf_loss = clf_loss_fn(prof_preds, prof_labels)                  
+
+                total_loss = quad_loss + lambda_clf * clf_loss
+
+                # Use quadruplet loss for optimization
+                total_loss.backward()
+
+                encoder_optimizer.step()
+                classifier_optimizer.step()
+                
+                # Track metrics
+                epoch_total_loss += total_loss.item()
+                epoch_quad_loss += quad_loss.item()
+                epoch_clf_loss += lambda_clf * clf_loss.item()
+                epoch_batch_count += 1
+                epoch_quadruplet_count += batch_quadruplet_count
+
+
+                
+                if log_to_wandb and batch_idx % 10 == 0:
+                    wandb.log({
+                        "batch_quadruplet_loss": quad_loss.item(),
+                        "batch_triplet_loss": triplet_loss.item(),
+                        "batch_quadruplets": batch_quadruplet_count,
+                        "batch": batch_idx + 1,
+                        "batch_ilo_anchors": n_ilo_anchors,
+                        "batch_clf_loss": lambda_clf * clf_loss.item(),
+                        "batch_total_loss": total_loss.item(),
+                    })
+            else:
+                print(f"No valid quadruplets found in batch {batch_idx + 1}. Skipping.")
+                print(f"Batch labels distribution: {np.bincount(current_batch_labels, minlength=8)}")
+                del embeddings, feats, imgs, labels
+                torch.cuda.empty_cache()
+                gc.collect()
+
+        
+        # End of epoch - calculate training metrics
+        if epoch_batch_count > 0:
+            train_loss = epoch_total_loss / epoch_batch_count
+            train_quad_loss = epoch_quad_loss / epoch_batch_count
+            train_clf_loss = epoch_clf_loss / epoch_batch_count
+
+            print(f"Epoch {epoch + 1}/{n_epochs}, Train Loss: {train_loss:.4f}")
+            print(f"Total quadruplets formed: {epoch_quadruplet_count}")
+            
+            all_embeddings = torch.cat(all_embeddings, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+
+            # Calculate mAP for full labels and profusion-only
+            train_map, train_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
+            prof_all_labels = all_labels % 4
+            train_prof_map, train_prof_class_map = helpers.compute_map_per_class(all_embeddings, prof_all_labels)
+            
+            # Ensure we track all classes
+            train_class_map_full = {class_id: train_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+            
+            print(f"Train mAP: {train_map:.4f}")
+            # print("- Per-Class Train mAP:")
+            for class_id in range(num_classes):
+                ap = train_class_map_full.get(class_id, 0.0)
+                class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+                # print(f"  {class_name}: mAP = {ap:.4f}")
+                
+                # Store per-class metrics
+                per_class_metrics[class_id]['train_ap'].append(ap)
+
+            
+            train_specificity, train_class_specificity = helpers.compute_specificity_at_sensitivity(
+                all_embeddings, all_labels, sensitivity_target=0.90)
+            
+            # Calculate classification metrics for profusion task
+            model.eval()
+            with torch.no_grad():
+                prof_preds = model.mc_prof_clf(all_embeddings.to(device))
+                train_prof_metrics = calculate_classification_metrics(
+                    prof_preds, prof_all_labels.to(device), task_type="multiclass"
+                )
+            model.train()
+            
+            # Update history
+            history['train_specificity'].append(train_specificity)
+            history['train_class_specificity'].append(train_class_specificity)
+            history['train_loss'].append(train_loss)
+            history['train_map'].append(train_map)
+            history['train_class_map'].append(train_class_map_full)
+            history['train_prof_map'].append(train_prof_map)
+        else:
+            print(f"Epoch {epoch + 1}/{n_epochs}: No valid quadruplets formed")
+            train_prof_metrics = {}
+        
+        # Run t-SNE visualization at regular intervals
+        if (epoch + 1) % tsne_interval == 0:
+            visualize_tsne(model, device, ilo_dataset, train_loader, 
+                          trained=True, log_to_wandb=log_to_wandb, 
+                          n_epochs=epoch+1, set_name="training", entire_dataset=False)
+            visualize_tsne(model, device, ilo_dataset, val_loader, 
+                          trained=True, log_to_wandb=log_to_wandb,
+                          n_epochs=epoch+1, set_name="validation", entire_dataset=False)
+            
+            
+            prof_labels = all_labels % 4
+            model.eval()
+            with torch.no_grad():
+                prof_preds = model.mc_prof_clf(all_embeddings.to(device))
+            cm = get_confusion_matrix(predictions=prof_preds,
+                                      labels=prof_labels.to(device))
+            model.train()
+
+            cm = get_confusion_matrix(predictions=prof_preds, labels=prof_labels)
+            prof_fig = create_conf_mat_plot(cm, clf_name="multiclass_profusion", epoch=epoch+1, set_name="train", log_to_wandb=True)
+        
+        # Validation loop
+        print("\nVALIDATION\n")
+        val_clf_loss = None
+
+
+        val_metrics = validate_quadruplet(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            triplet_loss_fn=triplet_loss_fn,
+            quadruplet_loss_fn=quadruplet_loss_fn,
+            num_classes=num_classes,
+            multiclass_stb_mapping=multiclass_stb_mapping,
+            mining_strat=mining_strat
+        )
+
+        val_loss = val_metrics['val_quadruplet_loss']
+        val_map = val_metrics['val_map']
+        val_class_map = val_metrics['val_class_map']
+        val_prof_map = val_metrics['val_prof_map']
+        val_embeddings = val_metrics['val_embeddings']
+        val_labels = val_metrics['val_labels']
+
+        # Handle confusion matrix and classifier loss (only if embeddings exist)
+        val_clf_loss = None
+        val_prof_metrics = {}
+        if val_embeddings is not None and val_labels is not None:
+            # Compute confusion matrix
+            prof_labels = val_labels % 4
+            model.eval()
+            with torch.no_grad():
+                prof_preds = model.mc_prof_clf(val_embeddings.to(device))
+                val_clf_loss = clf_loss_fn(prof_preds, prof_labels.to(device))
+                
+                # Calculate classification metrics for validation profusion task
+                val_prof_metrics = calculate_classification_metrics(
+                    prof_preds, prof_labels.to(device), task_type="multiclass"
+                )
+            
+            # Compute confusion matrix using actual predictions
+            cm = get_confusion_matrix(prof_preds, prof_labels)
+
+            if (epoch+1) % tsne_interval == 0:
+                val_conf_mat_fig = create_conf_mat_plot(cm, clf_name="multiclass_profusion", set_name="validation", epoch=epoch+1, log_to_wandb=True)
+
+        # Store validation metrics for all classes (outside the if block)
+        for class_id in range(num_classes):
+            per_class_metrics[class_id]['val_ap'].append(val_class_map.get(class_id, 0.0))
+
+        # Update history (outside the if block)
+        history['val_loss'].append(val_loss)
+        history['val_map'].append(val_map)
+        history['val_class_map'].append(val_class_map)
+        history['val_prof_map'].append(val_metrics['val_prof_map'])
+        history['val_quadruplet_loss'].append(val_loss)
+        history['val_specificity'].append(val_metrics['val_specificity'])
+        history['val_class_specificity'].append(val_metrics['val_class_specificity'])
+
+        # Log metrics to wandb
+        if log_to_wandb:
+            wandb_log_dict = {
+                "epoch": epoch + 1,
+                "train_loss": train_loss if epoch_batch_count > 0 else 0.0,
+                "train_map": train_map if epoch_batch_count > 0 else 0.0,
+                "train_quadruplet_loss": train_quad_loss if epoch_batch_count > 0 else 0.0,
+                "train_clf_loss": train_clf_loss if epoch_batch_count > 0 else 0.0,
+                "val_clf_loss": val_clf_loss.item() * lambda_clf if val_clf_loss is not None else 0.0,
+                "val_loss": val_loss,
+                "val_map": val_map,  # This will ALWAYS be logged now
+                "val_prof_map": val_prof_map,
+                "train_prof_map": train_prof_map if epoch_batch_count > 0 else 0.0,
+                "current_margin1": quadruplet_loss_fn.margin1,
+                "current_margin2": quadruplet_loss_fn.margin2,
+                "current_p_ilo_anchor": p_ilo_anchor if wandb.config.p_ilo_scheduling else wandb.config.p_ilo_anchor,
+                "train_quadruplets": epoch_quadruplet_count,
+                "train_spec@sens": train_specificity if epoch_batch_count > 0 else 0.0,
+                "val_spec@sens": val_metrics['val_specificity']
+            }
+            
+            # Add training profusion classification metrics
+            if train_prof_metrics:
+                wandb_log_dict.update({
+                    "train_prof_accuracy": train_prof_metrics.get('accuracy', 0.0),
+                    "train_prof_f1": train_prof_metrics.get('f1', 0.0),
+                    "train_prof_precision": train_prof_metrics.get('precision', 0.0),
+                    "train_prof_recall": train_prof_metrics.get('recall', 0.0),
+                    "train_prof_auc": train_prof_metrics.get('auc', 0.0),
+                    "train_prof_kappa": train_prof_metrics.get('kappa', 0.0),
+                    "train_prof_specificity": train_prof_metrics.get('specificity', 0.0)
+                })
+            
+            # Add validation profusion classification metrics
+            if val_prof_metrics:
+                wandb_log_dict.update({
+                    "val_prof_accuracy": val_prof_metrics.get('accuracy', 0.0),
+                    "val_prof_f1": val_prof_metrics.get('f1', 0.0),
+                    "val_prof_precision": val_prof_metrics.get('precision', 0.0),
+                    "val_prof_recall": val_prof_metrics.get('recall', 0.0),
+                    "val_prof_auc": val_prof_metrics.get('auc', 0.0),
+                    "val_prof_kappa": val_prof_metrics.get('kappa', 0.0),
+                    "val_prof_specificity": val_prof_metrics.get('specificity', 0.0)
+                })
+            
+            # Add per-class metrics
+            for class_id in range(num_classes):
+                train_ap = train_class_map_full.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_ap = val_class_map.get(class_id, 0.0)
+                train_sens = train_class_specificity.get(class_id, 0.0) if epoch_batch_count > 0 else 0.0
+                val_sens = val_metrics['val_class_specificity'].get(class_id, 0.0)
+                
+                wandb_log_dict[f"train_class_{class_id}_map"] = train_ap
+                wandb_log_dict[f"val_class_{class_id}_map"] = val_ap
+                wandb_log_dict[f"train_class_{class_id}_specificity"] = train_sens
+                wandb_log_dict[f"val_class_{class_id}_specificity"] = val_sens
+            
+            wandb.log(wandb_log_dict)
+
+        
+        # Save best model based on validation mAP
+        if epoch == 0 or (val_map > best_val_map and epoch > 50):
+            best_val_map = val_map
+            print(f"Saving best model with validation mAP: {best_val_map:.4f}")
+            best_model_state = model.state_dict().copy()
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': shared_optimizer.state_dict()
+            }, os.path.join(checkpoint_dir, f"best_model.pth"))
+
+
+            visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, True, True, n_epochs=epoch+1, set_name="best val mAP", entire_dataset=True)
+    
+
+        if (torch.cuda.memory_allocated()/1e9) > 3:
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        
+        # Save latest model
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': shared_optimizer.state_dict()
+        }, os.path.join(checkpoint_dir, f"final_model.pth"))
+
+    visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, True, True, n_epochs=n_epochs+1, set_name="final", entire_dataset=True)
+
+    
+    # Return training results
+    return {
+        'model': model,
+        'best_model_state': best_model_state,
+        'history': history,
+        'best_val_map': best_val_map,
+        'per_class_metrics': per_class_metrics
+    }
+
+def can_form_quadruplets(batch_labels):
+    """Check if batch can form valid quadruplets"""
+    label_counts = np.bincount(batch_labels, minlength=8)
+    
+    # Check for anchor-positive pairs
+    has_anchor_positive = False
+    for label in range(8):
+        if label_counts[label] >= 2:
+            has_anchor_positive = True
+            break
+    
+    if not has_anchor_positive:
+        return False
+    
+    # Check for different profusion scores for BSHN-v2
+    profusion_counts = np.zeros(4)
+    for i in range(4):
+        profusion_counts[i] = label_counts[i] + label_counts[i+4]
+    
+    if sum(1 for count in profusion_counts if count > 0) < 2:
+        return False
+    
+    # Check for TB+/TB- pairs
+    for prof in range(4):
+        if label_counts[prof] > 0 and label_counts[prof+4] > 0:
+            return True
+    
+    return False
+
+def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_loss_fn, num_classes=8, multiclass_stb_mapping=None, mining_strat="BSHN-v2"):
+    """
+    Validation loop for quadruplet loss model
+    
+    Args:
+        model: The model to evaluate
+        val_loader: DataLoader for validation set
+        device: Device to run validation on
+        triplet_loss_fn: Standard triplet loss function
+        quadruplet_loss_fn: Quadruplet loss function
+        num_classes: Number of classes (default: 8)
+        multiclass_stb_mapping: Dictionary mapping class IDs to names
+        mining_strat: Mining strategy for triplet formation
+    """
+    if multiclass_stb_mapping is None:
+        multiclass_stb_mapping = {i: f"Class {i}" for i in range(num_classes)}
+    
+    model.eval()
+    running_quad_loss = 0.0
+    running_triplet_loss = 0.0
+    all_embeddings = []
+    all_labels = []
+    val_quadruplet_count = 0
+    batch_with_quadruplets = 0
+    
+    # Build a map of validation labels to their indices
+    labels_to_indices = build_label_to_indices_map(val_loader.dataset.dataset)
+    
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(val_loader):
+            # Get validation batch
+            imgs = sample[0].to(device)
+            labels = sample[1].long().to(device)
+            
+            # Extract features and normalize embeddings
+            features = model.features(imgs)
+            embeddings = F.normalize(features, p=2, dim=1)
+            
+            # Store for mAP calculation
+            all_embeddings.append(embeddings.cpu())
+            all_labels.append(labels.cpu())
+            
+            # Get labels from batch
+            current_batch_labels = labels.cpu().numpy()
+            
+            # Collect quadruplet components
+            anchors = []
+            positives = []
+            negatives = []
+            negatives_2 = []
+            batch_quadruplet_count = 0
+            
+            # Form quadruplets using the same strategy as in training
+            for i, positive_label in enumerate(current_batch_labels):
+                # Positive embedding from current batch
+                positive_embedding = embeddings[i].unsqueeze(0)
+                
+                # Find anchor with same label
+                batch_matching_indices = [j for j in range(len(current_batch_labels)) 
+                                        if current_batch_labels[j] == positive_label and j != i]
+                
+                if batch_matching_indices:
+                    batch_anchor_idx = np.random.choice(batch_matching_indices)
+                    anchor_embedding = embeddings[batch_anchor_idx].unsqueeze(0)
+                    anchor_label = current_batch_labels[batch_anchor_idx]
+                else:
+                    # Try finding matching sample in dataset
+                    matching_indices = labels_to_indices.get(positive_label.item(), [])
+                    if i in matching_indices:
+                        matching_indices.remove(i)
+                    
+                    if matching_indices:
+                        chosen_index = np.random.choice(matching_indices)
+                        anchor_img, anchor_label = val_loader.dataset.dataset[chosen_index]
+                        anchor_img = anchor_img.unsqueeze(0).to(device)
+                        anchor_embedding = model.features(anchor_img)
+                        anchor_embedding = F.normalize(anchor_embedding, p=2, dim=1)
+                    else:
+                        continue
+                
+                # Find first negative using the mining strategy
+                if mining_strat == "BSHN-v2":
+                    prof_pos_score = positive_label % 4
+                    
+                    negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                      if label != positive_label and (label % 4) != prof_pos_score]
+                    
+                    if not negative_indices:
+                        # Fallback to any negative
+                        negative_indices = [j for j, label in enumerate(current_batch_labels) 
+                                          if label != positive_label]
+                
+                if negative_indices:
+                    negative_embeddings = embeddings[negative_indices]
+                    anchor_repeated = anchor_embedding.repeat(negative_embeddings.size(0), 1)
+                    
+                    # Compute distances
+                    dists = F.pairwise_distance(anchor_repeated, negative_embeddings)
+                    positive_distance = F.pairwise_distance(anchor_embedding, positive_embedding)
+                    
+                    # Find semi-hard negatives
+                    semi_hard_mask = (dists > positive_distance) & (dists < (positive_distance + triplet_loss_fn.margin))
+                    semi_hard_dists = dists[semi_hard_mask]
+                    
+                    if semi_hard_dists.numel() > 0:
+                        # Use semi-hard negative
+                        hard_idx_in_masked = torch.argmin(semi_hard_dists).item()
+                        semi_hard_indices = torch.nonzero(semi_hard_mask).squeeze(1)
+                        selected_neg_idx = semi_hard_indices[hard_idx_in_masked].item()
+                        
+                        negative_embedding = negative_embeddings[selected_neg_idx].unsqueeze(0)
+                        negative_label = current_batch_labels[negative_indices[selected_neg_idx]]
+                        
+                        # Find second negative with same profusion but different TB status
+                        negative_indices_2 = [j for j, label in enumerate(current_batch_labels) 
+                                          if (label % 4) == (negative_label % 4) and 
+                                             (int(label >= 4) != int(negative_label >= 4))]
+                        
+                        if negative_indices_2:
+                            neg_2_idx = np.random.choice(negative_indices_2)
+                            negative_embedding_2 = embeddings[neg_2_idx].unsqueeze(0)
+                            
+                            # Add to collections
+                            anchors.append(anchor_embedding)
+                            positives.append(positive_embedding)
+                            negatives.append(negative_embedding)
+                            negatives_2.append(negative_embedding_2)
+                            batch_quadruplet_count += 1
+            
+            # Process collected quadruplets
+            if batch_quadruplet_count > 0:
+                # Combine all quadruplet components
+                batch_anchors = torch.cat(anchors, dim=0)
+                batch_positives = torch.cat(positives, dim=0)
+                batch_negatives = torch.cat(negatives, dim=0)
+                batch_negatives_2 = torch.cat(negatives_2, dim=0)
+                
+                # Calculate losses
+                quad_loss = quadruplet_loss_fn(batch_anchors, batch_positives, batch_negatives, batch_negatives_2)
+                triplet_loss = triplet_loss_fn(batch_anchors, batch_positives, batch_negatives)
+                
+                running_quad_loss += quad_loss.item()
+                running_triplet_loss += triplet_loss.item()
+                batch_with_quadruplets += 1
+                val_quadruplet_count += batch_quadruplet_count
+    
+    # Calculate validation metrics
+    if all_embeddings:
+        all_embeddings = torch.cat(all_embeddings, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        
+        # Calculate mAP for full labels
+        val_map, val_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
+        
+        # Calculate mAP for profusion scores only
+        prof_all_labels = all_labels % 4
+        val_prof_map, val_prof_class_map = helpers.compute_map_per_class(all_embeddings, prof_all_labels)
+        
+        # Calculate average validation losses
+        avg_quad_loss = running_quad_loss / max(1, batch_with_quadruplets)
+        avg_triplet_loss = running_triplet_loss / max(1, batch_with_quadruplets)
+        
+        print(f"\nValidation Summary:")
+        print(f"- Total quadruplets formed: {val_quadruplet_count}")
+        print(f"- Avg Quadruplet Loss: {avg_quad_loss:.4f}")
+        print(f"- Avg Triplet Loss: {avg_triplet_loss:.4f}")
+        print(f"- Validation mAP: {val_map:.4f}")
+        print(f"- Validation Profusion mAP: {val_prof_map:.4f}")
+        
+        # Create full map including any missing classes
+        val_class_map_full = {class_id: val_class_map.get(class_id, 0.0) for class_id in range(num_classes)}
+        
+        for class_id in range(num_classes):
+            ap = val_class_map_full.get(class_id, 0.0)
+            class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+        
+        # Log validation metrics to wandb (basic ones)
+        wandb.log({
+            "val_quadruplet_loss": avg_quad_loss,
+            "val_triplet_loss": avg_triplet_loss,
+            "val_quadruplets": val_quadruplet_count
+        })
+        
+        # Calculate sensitivity at specificity
+        val_specificity, val_class_specificity = helpers.compute_specificity_at_sensitivity(
+            all_embeddings, all_labels, sensitivity_target=0.90)
+
+        print(f"- Validation Specificity@0.90Sensitivity: {val_specificity:.4f}")
+        for class_id in range(num_classes):
+            sensitivity = val_class_specificity.get(class_id, 0.0)
+            class_name = multiclass_stb_mapping.get(class_id, f"Class {class_id}")
+
+        # Return the sensitivity metrics with the other validation metrics
+        return {
+            'val_quadruplet_loss': avg_quad_loss,
+            'val_triplet_loss': avg_triplet_loss,
+            'val_map': val_map,
+            'val_class_map': val_class_map_full,
+            'val_prof_map': val_prof_map,
+            'val_prof_class_map': val_prof_class_map,
+            'val_embeddings': all_embeddings,
+            'val_labels': all_labels,
+            'val_specificity': val_specificity,
+            'val_class_specificity': val_class_specificity
+        }
+            
+    # Return empty metrics if no quadruplets were formed
+    return {
+        'val_quadruplet_loss': 0.0,
+        'val_triplet_loss': 0.0,
+        'val_map': 0.0,
+        'val_class_map': {class_id: 0.0 for class_id in range(num_classes)},
+        'val_prof_map': 0.0,
+        'val_prof_class_map': {class_id: 0.0 for class_id in range(4)},
+        'val_embeddings': None,
+        'val_labels': None,
+        'val_specificity': 0.0,
+        'val_class_specificity': {class_id: 0.0 for class_id in range(num_classes)}
+    }
+
+
+
+def calculate_per_class_metrics(confusion_matrix, prefix, y_true, y_prob, class_names=None):
+    if len(confusion_matrix.shape) != 3:
+        raise ValueError("Expected 3D confusion matrix for multilabel classification")
+
+    n_classes = confusion_matrix.shape[0]
+
+    if class_names is None:
+        class_names = [f"Class_{i:02d}" for i in range(n_classes)]
+
+    metrics_dict = {}
+
+    for i, class_name in enumerate(class_names):
+        cm = confusion_matrix[i]
+        tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
+
+        # Calculate all metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0  # Same as sensitivity
+        sensitivity = recall  # Sensitivity = Recall = TPR
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # TNR
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+        support = tp + fn  # actual positives
+        auc = roc_auc_score(y_true[:, i], y_prob[:, i])
+
+        # Log individual class metrics
+        metrics_dict.update({
+            f"{prefix}precision/{class_name}": precision,
+            f"{prefix}sensitivity/{class_name}": sensitivity,
+            f"{prefix}specificity/{class_name}": specificity,
+            f"{prefix}f1/{class_name}": f1,
+            f"{prefix}accuracy/{class_name}": accuracy,
+            f"{prefix}auc/{class_name}": auc,
+            f"{prefix}support/{class_name}": int(support),
+            f"{prefix}tp/{class_name}": int(tp),
+            f"{prefix}fp/{class_name}": int(fp),
+            f"{prefix}fn/{class_name}": int(fn),
+            f"{prefix}tn/{class_name}": int(tn)
+        })
+
+    return metrics_dict
+
+
+def get_confusion_matrix(predictions, labels):
+    """Compute confusion matrix for given predictions and labels"""
+    if predictions is None or labels is None:
+        return None
+    
+    # Convert to numpy for sklearn compatibility
+    if isinstance(predictions, torch.Tensor):
+        if predictions.dim() > 1:
+            # Multi-class predictions (logits)
+            pred_classes = torch.argmax(predictions, dim=1).cpu().numpy()
+        else:
+            # Binary predictions (probabilities)
+            pred_classes = (predictions > 0.5).cpu().numpy().astype(int)
+    else:
+        pred_classes = predictions
+    
+    labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else labels
+    
+    # Compute confusion matrix
+    cm = confusion_matrix(labels_np, pred_classes)
+    
+    return cm
+
+def create_conf_mat_plot(cm, clf_name, set_name, epoch, log_to_wandb=False):
+        if clf_name == "binary_profusion":
+            class_names = ["No Profusion", "Profusion Present"]
+            title = "Binary Profusion Classification"
+        elif clf_name == "binary_tb":
+            class_names = ["No TB", "TB"]
+            title = "Binary TB Classification"
+        elif clf_name == "multiclass_profusion":
+            class_names = ["Prof 0", "Prof 1", "Prof 2", "Prof 3"]
+            title = "Multiclass Profusion Classification"
+        elif clf_name == "multiclass_mstb":
+            class_names = ["Prof 0, TB-", "Prof 1, TB-", "Prof 2, TB-", "Prof 3, TB-", "Prof 0, TB+", "Prof 1, TB+", "Prof 2, TB+", "Prof 3, TB+"]
+            title = "Multiclass MSTB Classification"
+        else:
+            class_names = [f"Class {i}" for i in range(cm.shape[0])]
+            title = f"{clf_name} Classification"
+
+
+         # Create figure
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Create heatmap
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Count', rotation=270, labelpad=20)
+        
+        # Set title
+        ax.set_title(f'{title}\n{set_name.title()} Set - Epoch {epoch}', fontsize=14, pad=20)
+        
+        # Set tick labels
+        ax.set_xticks(np.arange(len(class_names)))
+        ax.set_yticks(np.arange(len(class_names)))
+        ax.set_xticklabels(class_names, rotation=45, ha='right')
+        ax.set_yticklabels(class_names)
+        
+        # Add text annotations
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                text_color = "white" if cm[i, j] > thresh else "black"
+                ax.text(j, i, format(cm[i, j], 'd'),
+                    ha="center", va="center", color=text_color, fontsize=12)
+        
+        # Set labels
+        ax.set_ylabel('True Label', fontsize=12)
+        ax.set_xlabel('Predicted Label', fontsize=12)
+        
+        # Calculate and add accuracy text
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
+            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
+            sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+            metrics_text = f'Accuracy: {accuracy*100:.3f}%\nSensitivity: {sensitivity*100:.3f}%\nSpecificity: {specificity*100:.3f}%'
+        else:
+            accuracy = np.trace(cm) / np.sum(cm) if np.sum(cm) > 0 else 0.0
+            metrics_text = f'Accuracy: {accuracy*100:.3f}%'
+
+        # Add metrics text box
+        ax.text(0.02, 0.98, metrics_text, transform=ax.transAxes, 
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+
+        if log_to_wandb:
+            wandb.log({
+                f"{set_name}_{clf_name}_confusion_matrix": wandb.Image(fig)
+            })     
+            
+        return fig
