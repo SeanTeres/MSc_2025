@@ -1,8 +1,7 @@
-from sklearn.metrics import roc_auc_score
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import roc_curve
+from sklearn.metrics import classification_report, roc_curve, confusion_matrix, accuracy_score, recall_score, f1_score, precision_score, cohen_kappa_score, roc_auc_score
 
 
 def get_cm_for_class(cm, k):
@@ -159,94 +158,170 @@ def multiclass_specificity_at_sensitivity(y_true, y_prob, min_sens=0.9):
     return np.mean(specs), np.array(thresholds)
 
 
-def calculate_per_class_metrics(confusion_matrix, prefix, y_true, y_prob, class_names=None):
-    # Handle both 2D (multiclass) and 3D (multilabel) confusion matrices
-    if len(confusion_matrix.shape) == 2:
-        # Multiclass case - convert 2D CM to per-class metrics
-        n_classes = confusion_matrix.shape[0]
-        
-        if class_names is None:
-            class_names = [f"Class_{i:02d}" for i in range(n_classes)]
-        
-        metrics_dict = {}
-        
-        for i, class_name in enumerate(class_names):
-            # Extract TP, FP, FN, TN for class i from multiclass confusion matrix
-            tp = confusion_matrix[i, i]
-            fp = confusion_matrix[:, i].sum() - tp  # Sum of column i minus TP
-            fn = confusion_matrix[i, :].sum() - tp  # Sum of row i minus TP
-            tn = confusion_matrix.sum() - tp - fp - fn
-            
-            # Calculate all metrics
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0  # Same as sensitivity
-            sensitivity = recall  # Sensitivity = Recall = TPR
-            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # TNR
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
-            support = tp + fn  # actual positives
-            
-            # For multiclass, convert to one-vs-rest for AUC calculation
-            try:
-                y_true_binary = (y_true == i).astype(int)
-                y_prob_class = y_prob[:, i] if y_prob.ndim > 1 else y_prob
-                auc = roc_auc_score(y_true_binary, y_prob_class)
-            except:
-                auc = 0.0  # Handle cases where AUC can't be calculated
-            
-            # Log individual class metrics
-            metrics_dict.update({
-                f"{prefix}precision/{class_name}": precision,
-                f"{prefix}sensitivity/{class_name}": sensitivity,
-                f"{prefix}specificity/{class_name}": specificity,
-                f"{prefix}f1/{class_name}": f1,
-                f"{prefix}accuracy/{class_name}": accuracy,
-                f"{prefix}auc/{class_name}": auc,
-                f"{prefix}support/{class_name}": int(support),
-                f"{prefix}tp/{class_name}": int(tp),
-                f"{prefix}fp/{class_name}": int(fp),
-                f"{prefix}fn/{class_name}": int(fn),
-                f"{prefix}tn/{class_name}": int(tn)
-            })
+
+
+
+def calculate_classification_metrics(predictions, labels, task_type="multiclass", binary_target_class=None):
+    """
+    Calculate comprehensive classification metrics
     
-    elif len(confusion_matrix.shape) == 3:
-        # Original multilabel case - keep existing code
-        n_classes = confusion_matrix.shape[0]
-
-        if class_names is None:
-            class_names = [f"Class_{i:02d}" for i in range(n_classes)]
-
-        metrics_dict = {}
-
-        for i, class_name in enumerate(class_names):
-            cm = confusion_matrix[i]
-            tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
-
-            # Calculate all metrics
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0  # Same as sensitivity
-            sensitivity = recall  # Sensitivity = Recall = TPR
-            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # TNR
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
-            support = tp + fn  # actual positives
-            auc = roc_auc_score(y_true[:, i], y_prob[:, i])
-
-            # Log individual class metrics
-            metrics_dict.update({
-                f"{prefix}precision/{class_name}": precision,
-                f"{prefix}sensitivity/{class_name}": sensitivity,
-                f"{prefix}specificity/{class_name}": specificity,
-                f"{prefix}f1/{class_name}": f1,
-                f"{prefix}accuracy/{class_name}": accuracy,
-                f"{prefix}auc/{class_name}": auc,
-                f"{prefix}support/{class_name}": int(support),
-                f"{prefix}tp/{class_name}": int(tp),
-                f"{prefix}fp/{class_name}": int(fp),
-                f"{prefix}fn/{class_name}": int(fn),
-                f"{prefix}tn/{class_name}": int(tn)
-            })
+    Args:
+        predictions: Model predictions (logits)
+        labels: True labels
+        task_type: "binary" or "multiclass"
+        binary_target_class: If provided, convert multiclass to binary (target_class vs rest)
+    
+    Returns:
+        Dictionary of metrics
+    """
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.detach().cpu()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu()
+    
+    metrics = {}
+    
+    # Convert multiclass to binary if requested
+    if task_type == "multiclass" and binary_target_class is not None:
+        # Convert to binary: target_class vs rest
+        labels_np = labels.numpy()
+        y_true_binary = (labels_np == binary_target_class).astype(int)
+        
+        if predictions.dim() > 1:
+            probs = torch.softmax(predictions, dim=1).numpy()
+            pred_classes = torch.argmax(predictions, dim=1).numpy()
+            # Probability of being the target class
+            y_prob_binary = probs[:, binary_target_class]
+        else:
+            pred_classes = predictions.numpy()
+            y_prob_binary = None
+        
+        y_pred_binary = (pred_classes == binary_target_class).astype(int)
+        
+        # Now treat as binary classification
+        metrics['accuracy'] = accuracy_score(y_true_binary, y_pred_binary)
+        metrics['f1'] = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+        metrics['precision'] = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+        metrics['recall'] = recall_score(y_true_binary, y_pred_binary, zero_division=0)
+        metrics['kappa'] = cohen_kappa_score(y_true_binary, y_pred_binary)
+        
+        # AUC (using probabilities)
+        try:
+            if y_prob_binary is not None:
+                metrics['auc'] = roc_auc_score(y_true_binary, y_prob_binary)
+            else:
+                metrics['auc'] = 0.0
+        except:
+            metrics['auc'] = 0.0
+        
+        # Specificity
+        try:
+            cm = confusion_matrix(y_true_binary, y_pred_binary)
+            if cm.shape == (2, 2):
+                tn, fp, fn, tp = cm.ravel()
+                metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            else:
+                metrics['specificity'] = 0.0
+        except:
+            metrics['specificity'] = 0.0
+        
+        # Specificity @ Sensitivity
+        try:
+            if y_prob_binary is not None:
+                spec_at_sens, threshold = specificity_at_sensitivity(y_true_binary, y_prob_binary, min_sens=0.9)
+                metrics['spec_at_sens'] = spec_at_sens
+                metrics['threshold_at_sens'] = threshold
+            else:
+                metrics['spec_at_sens'] = 0.0
+                metrics['threshold_at_sens'] = 1.0
+        except:
+            metrics['spec_at_sens'] = 0.0
+            metrics['threshold_at_sens'] = 1.0
+        
+        # Store the binary confusion matrix for plotting
+        metrics['confusion_matrix'] = confusion_matrix(y_true_binary, y_pred_binary)
+        metrics['y_true_binary'] = y_true_binary
+        metrics['y_pred_binary'] = y_pred_binary
+        metrics['y_prob_binary'] = y_prob_binary
+        
+        return metrics
+    
+    elif task_type == "binary":
+        # Your existing binary code...
+        probs = torch.sigmoid(predictions.squeeze()).numpy()
+        pred_classes = (probs > 0.5).astype(int)
+        labels_np = labels.numpy()
+        
+        # Basic metrics
+        metrics['accuracy'] = accuracy_score(labels_np, pred_classes)
+        metrics['f1'] = f1_score(labels_np, pred_classes, zero_division=0)
+        metrics['precision'] = precision_score(labels_np, pred_classes, zero_division=0)
+        metrics['recall'] = recall_score(labels_np, pred_classes, zero_division=0)
+        metrics['kappa'] = cohen_kappa_score(labels_np, pred_classes)
+        
+        # AUC (using probabilities)
+        try:
+            metrics['auc'] = roc_auc_score(labels_np, probs)
+        except:
+            metrics['auc'] = 0.0
+        
+        # Specificity
+        try:
+            cm = confusion_matrix(labels_np, pred_classes)
+            if cm.shape == (2, 2):
+                tn, fp, fn, tp = cm.ravel()
+                metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            else:
+                metrics['specificity'] = 0.0
+        except:
+            metrics['specificity'] = 0.0
+        
+        return metrics
+    
     else:
-        raise ValueError("Expected 2D (multiclass) or 3D (multilabel) confusion matrix")
-
-    return metrics_dict
+        # Your existing multiclass code...
+        if predictions.dim() > 1:
+            pred_classes = torch.argmax(predictions, dim=1).numpy()
+            probs = torch.softmax(predictions, dim=1).numpy()
+        else:
+            pred_classes = predictions.numpy()
+            probs = None
+        
+        labels_np = labels.numpy()
+        
+        # Basic metrics
+        metrics['accuracy'] = accuracy_score(labels_np, pred_classes)
+        metrics['f1'] = f1_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['precision'] = precision_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['recall'] = recall_score(labels_np, pred_classes, average='weighted', zero_division=0)
+        metrics['kappa'] = cohen_kappa_score(labels_np, pred_classes)
+        
+        # AUC (multiclass)
+        try:
+            if probs is not None:
+                metrics['auc'] = roc_auc_score(labels_np, probs, multi_class='ovr', average='weighted')
+            else:
+                metrics['auc'] = 0.0
+        except:
+            metrics['auc'] = 0.0
+        
+        # Specificity (macro average for multiclass)
+        try:
+            cm = confusion_matrix(labels_np, pred_classes)
+            n_classes = cm.shape[0]
+            
+            specificities = []
+            for i in range(n_classes):
+                tp = cm[i, i]
+                fn = cm[i, :].sum() - tp
+                fp = cm[:, i].sum() - tp
+                tn = cm.sum() - tp - fn - fp
+                
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                specificities.append(specificity)
+            
+            metrics['specificity'] = np.mean(specificities)
+        except:
+            metrics['specificity'] = 0.0
+    
+    return metrics
