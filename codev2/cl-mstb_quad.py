@@ -69,7 +69,7 @@ def set_random_seeds(seed=42):
 
 
 if __name__ == "__main__":
-    set_random_seeds(42)  # Set a fixed seed for reproducibility
+    set_random_seeds()  # Set a fixed seed for reproducibility
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
@@ -122,18 +122,21 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-2', name='TEST-wo_check_and_clf',
+        wandb.init(project='MBOD-cl-3', name='Quadruplet_Orig_Paper_n1_mstb-025_mprof',
             config={
                 "seed": 42,  # ADD THIS
                 "experiment_type": "Quadruplet (Original)",
+                "n2_selection": "Original Paper", # Decide how we select N2 samples (label-based only) ---> Remember, no SH constraints here (for now)
+                "n1_selection": "MSTB-based",
                 "prioritize_prof_n1": False,  # Prioritize highest profusion difference for N1 samples
-                "beta_factor": 0.25,
+                "beta_factor": 0.25, # The ratio between the two margins in quadruplet loss
                 "dataset": "MBOD ONLY",
                 "labeling_scheme": "MSTB",
-                "batch_size": 24,
-                "n_epochs": 1500,
+                "batch_size": 32,
+                "n_epochs": 1000,
                 "learning_rate": 1e-4,
                 "oversample": True,
+                "OS_factor": 0.5,  # Oversampling factor
                 "initial_margin": 0.05,      
                 "final_margin": 0.5,        
                 "margin_scheduling": True,   # Enable margin scheduling
@@ -141,15 +144,14 @@ if __name__ == "__main__":
                 "mining": "BSHN-v2",
                 "augmentations": True,
                 "filtered_dataset": True,
-                "loss_function": "Triplet",
+                "loss_function": "Quadruplet",
                 "p_ilo_anchor": 0.0,
                 "p_ilo_final": 0.1,
                 "num_classes": 8,  # Explicitly specify 8 classes
-                "OS_factor": 0.5,  # Oversampling factor
                 "p_ilo_scheduling": False,  # Enable p_ilo scheduling
                 "mask_ilo_tb": False,  # Mask ILO TB-based loss
                 "use_classification": True,
-                "active_classifiers": "multiclass_profusion",
+                "active_classifier": "multiclass_profusion",
                 "lambda_clf": 0.25,  # Weight for classifier loss
             })
         
@@ -157,14 +159,19 @@ if __name__ == "__main__":
 
         model = xrv.models.ResNet(weights="resnet50-res512-all")
 
-        if(wandb.config.use_classification and wandb.config.active_classifiers == "multiclass_profusion"):
+        if(wandb.config.use_classification and wandb.config.active_classifier == "multiclass_profusion"):
             model.mc_prof_clf = cl_utils.MulticlassClassifier(input_dim=2048, num_classes=4, name="MC-Prof", dropout_rate=0.3)
+            classifier_optimizer = torch.optim.Adam(model.mc_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
             clf_loss_fn = nn.CrossEntropyLoss()
+            
+        elif(wandb.config.use_classification and wandb.config.active_classifier == "binary_profusion"):
+            model.bin_prof_clf= cl_utils.BinaryClassifier(input_dim=2048, name="Bin-Prof", dropout_rate=0.3)
+            classifier_optimizer = torch.optim.Adam(model.bin_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
+            clf_loss_fn = nn.BCEWithLogitsLoss()
 
         model = model.to(device)
 
         encoder_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
-        classifier_optimizer = torch.optim.Adam(model.mc_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
 
         triplet_loss_fn = nn.TripletMarginLoss(margin=wandb.config.initial_margin, p=2)
 
@@ -304,6 +311,18 @@ if __name__ == "__main__":
             lambda_clf=wandb.config.lambda_clf,
             use_classification= wandb.config.use_classification
         )
+
+        test_results = cl_utils.test_quadruplet_model(
+            model=model,
+            test_loader=test_loader,
+            device=device,
+            triplet_loss_fn=triplet_loss_fn,
+            quadruplet_loss_fn=quadruplet_loss_fn,
+            ilo_dataset=ilo_dataset,
+            experiment_name=experiment_name,
+            log_to_wandb=True,
+            clf_loss_fn=clf_loss_fn if wandb.config.use_classification else None,
+)
 
        
 
