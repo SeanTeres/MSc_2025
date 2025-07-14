@@ -185,18 +185,37 @@ def calculate_classification_metrics(predictions, labels, task_type="multiclass"
     if task_type == "multiclass" and binary_target_class is not None:
         # Convert to binary: target_class vs rest
         labels_np = labels.numpy()
-        y_true_binary = (labels_np == binary_target_class).astype(int)
-        
-        if predictions.dim() > 1:
-            probs = torch.softmax(predictions, dim=1).numpy()
-            pred_classes = torch.argmax(predictions, dim=1).numpy()
-            # Probability of being the target class
-            y_prob_binary = probs[:, binary_target_class]
+
+        if binary_target_class == "profusion_present":
+            # Prof 1-3 = 1 (positive), Prof 0 = 0 (negative)
+            y_true_binary = (labels_np > 0).astype(int)
+            
+            if predictions.dim() > 1:
+                probs = torch.softmax(predictions, dim=1).numpy()
+                pred_classes = torch.argmax(predictions, dim=1).numpy()
+                # Probability of having ANY profusion (Prof 1-3)
+                y_prob_binary = 1 - probs[:, 0]  # 1 - P(Prof 0)
+            else:
+                pred_classes = predictions.numpy()
+                y_prob_binary = None
+            
+            # Binary prediction: Prof 1-3 vs Prof 0
+            y_pred_binary = (pred_classes > 0).astype(int)
         else:
-            pred_classes = predictions.numpy()
-            y_prob_binary = None
+            # Original behavior: specific class vs rest
+            y_true_binary = (labels_np == binary_target_class).astype(int)
+            
+            if predictions.dim() > 1:
+                probs = torch.softmax(predictions, dim=1).numpy()
+                pred_classes = torch.argmax(predictions, dim=1).numpy()
+                # Probability of being the target class
+                y_prob_binary = probs[:, binary_target_class]
+            else:
+                pred_classes = predictions.numpy()
+                y_prob_binary = None
+            
+            y_pred_binary = (pred_classes == binary_target_class).astype(int)
         
-        y_pred_binary = (pred_classes == binary_target_class).astype(int)
         
         # Now treat as binary classification
         metrics['accuracy'] = accuracy_score(y_true_binary, y_pred_binary)
@@ -325,3 +344,87 @@ def calculate_classification_metrics(predictions, labels, task_type="multiclass"
             metrics['specificity'] = 0.0
     
     return metrics
+
+
+def calculate_embedding_alignment_metrics(embeddings, labels):
+    """
+    Calculate embedding alignment metrics including intra-class and inter-class distances
+    
+    Args:
+        embeddings: Normalized embeddings from the model
+        labels: Class labels for each embedding
+        
+    Returns:
+        dict: Dictionary containing alignment metrics
+    """
+    if isinstance(embeddings, torch.Tensor):
+        embeddings = embeddings.detach().cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+    
+    # Get unique classes
+    unique_classes = np.unique(labels)
+    num_classes = len(unique_classes)
+    
+    # Initialize metrics
+    intra_class_dists = []
+    inter_class_dists = []
+    
+    # Calculate intra-class distances (within same class)
+    for class_idx in unique_classes:
+        class_mask = labels == class_idx
+        class_embeddings = embeddings[class_mask]
+        
+        if len(class_embeddings) <= 1:
+            continue  # Skip classes with only one sample
+            
+        # Calculate pairwise distances within class
+        from sklearn.metrics import pairwise_distances
+        class_dists = pairwise_distances(class_embeddings)
+        # Get upper triangle (excluding diagonal)
+        intra_dists = class_dists[np.triu_indices_from(class_dists, k=1)]
+        intra_class_dists.extend(intra_dists)
+    
+    # Calculate inter-class distances (between different classes)
+    for i in range(num_classes):
+        for j in range(i+1, num_classes):
+            class_i_mask = labels == unique_classes[i]
+            class_j_mask = labels == unique_classes[j]
+            
+            class_i_embeddings = embeddings[class_i_mask]
+            class_j_embeddings = embeddings[class_j_mask]
+            
+            if len(class_i_embeddings) == 0 or len(class_j_embeddings) == 0:
+                continue
+                
+            # Calculate pairwise distances between classes
+            from sklearn.metrics import pairwise_distances
+            inter_dists = pairwise_distances(class_i_embeddings, class_j_embeddings)
+            inter_class_dists.extend(inter_dists.flatten())
+    
+    # Calculate metrics
+    intra_class_mean = np.mean(intra_class_dists) if intra_class_dists else np.nan
+    inter_class_mean = np.mean(inter_class_dists) if inter_class_dists else np.nan
+    
+    # Embedding alignment ratio (higher is better)
+    embedding_ratio = inter_class_mean / intra_class_mean if intra_class_mean > 0 else np.nan
+    
+    # Calculate silhouette score if there are enough samples
+    silhouette = np.nan
+    davies_bouldin = np.nan
+    
+    try:
+        from sklearn.metrics import silhouette_score, davies_bouldin_score
+        if len(unique_classes) > 1 and all(np.sum(labels == c) > 1 for c in unique_classes):
+            silhouette = silhouette_score(embeddings, labels)
+            davies_bouldin = davies_bouldin_score(embeddings, labels)
+    except:
+        pass
+    
+    return {
+        'intra_class_distance': intra_class_mean,
+        'inter_class_distance': inter_class_mean,
+        'embedding_ratio': embedding_ratio,
+        'silhouette_score': silhouette,
+        'davies_bouldin_score': davies_bouldin
+    }
