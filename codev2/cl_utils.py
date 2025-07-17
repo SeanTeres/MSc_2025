@@ -35,7 +35,7 @@ from pytorch_metric_learning import losses, miners
 import torch
 from torch import device, nn, Tensor
 import torch.nn.functional as F
-from clf_manager import BinaryClassifier, MulticlassClassifier
+from clf_manager import BinaryClassifier, MulticlassClassifier, XRVBasedClassifier
 # Add after the existing imports at the top
 import cl_metrics
 
@@ -306,11 +306,15 @@ def train_model_quadruplet(
             raise ValueError("clf_loss_fn must be provided when use_classification=True")
         if classifier_optimizer is None:
             raise ValueError("classifier_optimizer must be provided when use_classification=True")
-        if not hasattr(model, 'mc_prof_clf'):
-            raise ValueError("Model must have 'mc_prof_clf' attribute when use_classification=True")
+        if (not hasattr(model, 'mc_prof_clf')) and (not hasattr(model, 'bin_prof_clf')):
+            raise ValueError("Model must have 'mc_prof_clf' or 'bin_prof_clf' attribute when use_classification=True and active_classifier='binary'")
         print("🎯 Classification training enabled")
     else:
         print("🔄 Pure contrastive learning mode (no classification)")
+
+    # from torch.optim.lr_scheduler import ReduceLROnPlateau
+    # clf_scheduler = ReduceLROnPlateau(classifier_optimizer, 'min', factor=0.2, patience=3, verbose=True) # TO DO: Implement this properly (if it works)
+    # encoder_scheduler = ReduceLROnPlateau(encoder_optimizer, 'min', factor=0.2, patience=5, verbose=True)
 
 
     # Create checkpoint directory
@@ -320,6 +324,7 @@ def train_model_quadruplet(
     # Tracking metrics
     num_classes = 8  # For multiclass_stb
     best_val_map = 0.0
+    best_val_prof_bin_specificity = 0.0
 
 
     best_model_state = None
@@ -346,13 +351,23 @@ def train_model_quadruplet(
     # Initialize class-specific metrics
     per_class_metrics = {class_id: {'train_ap': [], 'val_ap': []} for class_id in range(num_classes)}
 
-
+    classifier_frozen = True
     for epoch in range(n_epochs):
         print(f"Epoch {epoch + 1}/{n_epochs}")
         print("=" * 50)
+        # if classifier_frozen and epoch >= 150:
+        #     for param in model.mc_prof_clf.parameters():
+        #         param.requires_grad = True
+        #     classifier_frozen = False
+        #     print("🔓 Unfroze classifier for training.")
+
+        # # Freeze classifier for first half
+        # if classifier_frozen:
+        #     for param in model.mc_prof_clf.parameters():
+        #         param.requires_grad = False
 
         # Apply margin scheduling if enabled
-        if margin_scheduling:
+        if margin_scheduling and wandb.config.margin_schedule_scheme == "Epoch-Sine":
             current_margin = get_sin_scheduled_margin(epoch, margin_scheduling, initial_margin, final_margin, n_epochs, scheduling_fraction)
             triplet_loss_fn.margin = current_margin
             quadruplet_loss_fn.margin1 = current_margin
@@ -612,8 +627,8 @@ def train_model_quadruplet(
             prof_preds = clf_results['predictions']
             clf_loss = clf_results['loss']
 
-            train_prof_labels.append(prof_labels.detach().cpu())
-            train_prof_preds.append(prof_preds.detach().cpu())
+            train_prof_labels.append(prof_labels.cpu())
+            train_prof_preds.append(prof_preds.cpu())
 
             total_loss = quad_loss + lambda_clf * clf_loss
 
@@ -687,12 +702,39 @@ def train_model_quadruplet(
             all_prof_clf_labels = torch.cat(train_prof_labels, dim=0)
             all_prof_clf_preds = torch.cat(train_prof_preds, dim=0)
 
+            train_misclass_confidences = cl_metrics.get_misclassification_confidences(all_prof_clf_preds, all_prof_clf_labels, adjacent_only=False)
+            train_adj_misclass_confidences = cl_metrics.get_misclassification_confidences(all_prof_clf_preds, all_prof_clf_labels, adjacent_only=True)
+            
+
+            train_misclass_confidences_per_class = cl_metrics.get_misclassification_confidences_per_class(
+                all_prof_clf_preds, all_prof_clf_labels, adjacent_only=False
+            )
+            train_adj_misclass_confidences_per_class = cl_metrics.get_misclassification_confidences_per_class(
+                all_prof_clf_preds, all_prof_clf_labels, adjacent_only=True
+            )
+
+            for cls, confs in train_misclass_confidences_per_class.items():
+                wandb.log({f"train_misclass_conf_mean_class_{cls}": np.mean(confs) if len(confs) > 0 else 0.0, "epoch": epoch + 1})
+
+            for cls, confs in train_adj_misclass_confidences_per_class.items():
+                wandb.log({f"train_adj_misclass_conf_mean_class_{cls}": np.mean(confs) if len(confs) > 0 else 0.0, "epoch": epoch + 1})
+
+
+
+
+            if active_classifier == "multiclass_profusion":  # TO DO: Check if works
+                # Change the task type
+                task = "multiclass"
+            elif active_classifier == "binary_profusion":
+                # Change the task type
+                task = "binary"
+
             train_prof_metrics = cl_metrics.calculate_classification_metrics(
-                all_prof_clf_preds, all_prof_clf_labels, task_type="multiclass"
+                all_prof_clf_preds, all_prof_clf_labels, task_type=task
             )
 
             train_prof_binary_metrics = cl_metrics.calculate_classification_metrics(
-                all_prof_clf_preds, all_prof_clf_labels, task_type="multiclass", binary_target_class="profusion_present"
+                all_prof_clf_preds, all_prof_clf_labels, task_type=task, binary_target_class="profusion_present"
             )
 
             train_embedding_metrics = cl_metrics.calculate_embedding_alignment_metrics(all_embeddings, all_labels)
@@ -710,6 +752,32 @@ def train_model_quadruplet(
         else:
             print(f"Epoch {epoch + 1}/{n_epochs}: No valid quadruplets formed")
             train_prof_metrics = {}
+
+        prof_labels = all_labels % 4
+        with torch.no_grad():
+            cm = get_confusion_matrix(predictions=all_prof_clf_preds,
+                                    labels=all_prof_clf_labels)
+
+            # prof_fig = create_conf_mat_plot(cm, clf_name="multiclass_profusion", epoch=epoch+1, set_name="train", log_to_wandb=True)
+
+            if all_prof_clf_preds.dim() > 1:
+                # Multiclass case
+                prof_labels_binary = (all_prof_clf_labels > 0).long()
+                prof_preds_binary = (torch.argmax(all_prof_clf_preds, dim=1) > 0).long()
+            else:
+                # Binary case
+                prof_labels_binary = (all_prof_clf_labels > 0).long()
+                prof_preds_binary = (torch.sigmoid(all_prof_clf_preds) > 0.5).long()
+
+            cm_binary = get_confusion_matrix(prof_preds_binary, prof_labels_binary)
+
+            train_combined_fig = create_combined_conf_mat_plot(             # Just for TP,FN, FP, TN logging  ---> TO DO: Fix this
+                multiclass_cm=cm, 
+                binary_cm=cm_binary, 
+                set_name="train", 
+                epoch=epoch+1, 
+                log_to_wandb=False
+            )
         
         # Run t-SNE visualization at regular intervals
         if (epoch + 1) % tsne_interval == 0:
@@ -719,30 +787,24 @@ def train_model_quadruplet(
             visualize_tsne(model, device, ilo_dataset, val_loader, 
                           trained=True, log_to_wandb=log_to_wandb,
                           n_epochs=epoch+1, set_name="validation", entire_dataset=False)
+            # train_binary_conf_mat_fig = create_conf_mat_plot(cm_binary, clf_name="binary_profusion", set_name="train", epoch=epoch+1, log_to_wandb=True)
             
-            
-            prof_labels = all_labels % 4
-            with torch.no_grad():
-                cm = get_confusion_matrix(predictions=all_prof_clf_preds,
-                                      labels=all_prof_clf_labels)
-
-                # prof_fig = create_conf_mat_plot(cm, clf_name="multiclass_profusion", epoch=epoch+1, set_name="train", log_to_wandb=True)
-
-                prof_labels_binary = (all_prof_clf_labels > 0).long()  # Always use > 0
-                prof_preds_binary = (torch.argmax(all_prof_clf_preds, dim=1) > 0).long()  # Always use > 0
-                
-                cm_binary = get_confusion_matrix(prof_preds_binary, prof_labels_binary)
-                # train_binary_conf_mat_fig = create_conf_mat_plot(cm_binary, clf_name="binary_profusion", set_name="train", epoch=epoch+1, log_to_wandb=True)
-                        # Use the new combined function
-                train_combined_fig = create_combined_conf_mat_plot(
-                    multiclass_cm=cm, 
-                    binary_cm=cm_binary, 
-                    set_name="train", 
-                    epoch=epoch+1, 
-                    log_to_wandb=True
-                )
+            # Use the new combined function
+            train_combined_fig = create_combined_conf_mat_plot(
+                multiclass_cm=cm, 
+                binary_cm=cm_binary, 
+                set_name="train", 
+                epoch=epoch+1, 
+                log_to_wandb=True
+            )
         # Validation loop
         print("\nVALIDATION\n")
+
+        wandb.log({
+        "encoder_lr": encoder_optimizer.param_groups[0]['lr'],
+        "classifier_lr": classifier_optimizer.param_groups[0]['lr']
+        })
+
 
         val_metrics = validate_quadruplet(
             model=model,
@@ -768,24 +830,88 @@ def train_model_quadruplet(
         val_inter_class_distance = val_metrics['val_inter_class_distance']
         val_intra_class_distance = val_metrics['val_intra_class_distance']
         val_silhouette_score = val_metrics['val_silhouette_score']
-        val_davies_bouldin = val_metrics['val_davies_bouldin']
+
+        # Use validation predictions that were already calculated
+        val_prof_preds = val_metrics['val_prof_preds']
+        val_prof_labels = val_metrics['val_prof_labels']
+
+        val_adj_misclass_confidences = cl_metrics.get_misclassification_confidences(val_prof_preds, val_prof_labels, adjacent_only=True)
+        val_misclass_confidences = cl_metrics.get_misclassification_confidences(val_prof_preds, val_prof_labels, adjacent_only=False)
+
+        val_misclass_confidences_per_class = cl_metrics.get_misclassification_confidences_per_class(
+            val_prof_preds, val_prof_labels, adjacent_only=False
+        )
+        val_adj_misclass_confidences_per_class = cl_metrics.get_misclassification_confidences_per_class(
+            val_prof_preds, val_prof_labels, adjacent_only=True
+        )
+
+        for cls, confs in val_misclass_confidences_per_class.items():
+            wandb.log({f"val_misclass_conf_mean_class_{cls}": np.mean(confs) if len(confs) > 0 else 0.0, "epoch": epoch + 1})
+
+        for cls, confs in val_adj_misclass_confidences_per_class.items():
+            wandb.log({f"val_adj_misclass_conf_mean_class_{cls}": np.mean(confs) if len(confs) > 0 else 0.0, "epoch": epoch + 1})
+
+        # Create confusion matrix from accumulated predictions
+        cm = get_confusion_matrix(val_prof_preds, val_prof_labels)
+
+        if all_prof_clf_preds.dim() > 1:
+            # Multiclass case
+            prof_labels_binary = (val_prof_labels > 0).long()
+            prof_preds_binary = (torch.argmax(val_prof_preds, dim=1) > 0).long()
+        else:
+            # Binary case
+            prof_labels_binary = (val_prof_labels > 0).long()
+            prof_preds_binary = (torch.sigmoid(val_prof_preds) > 0.5).long()
+            
+        # Use consistent binary conversion
+        cm_binary = get_confusion_matrix(prof_preds_binary, prof_labels_binary)
+        
+        val_combined_fig = create_combined_conf_mat_plot(
+            multiclass_cm=cm, 
+            binary_cm=cm_binary, 
+            set_name="validation", 
+            epoch=epoch+1, 
+            log_to_wandb=False
+        )
+
+        # clf_scheduler.step(val_metrics['val_clf_loss']) # TO DO: Implement this properly (if it works)
+        # encoder_scheduler.step(val_loss)
+
+
+        # Save best model based on validation mAP
+        if epoch == 0 or (val_prof_binary_metrics.get('specificity', 0.0) > best_val_prof_bin_specificity and epoch > 50):
+            best_val_prof_bin_specificity = val_prof_binary_metrics.get('specificity', 0.0)
+            print(f"Saving best model with validation profusion binary specificity: {best_val_prof_bin_specificity:.4f}")
+            best_model_state = model.state_dict().copy()
+            
+            # Create checkpoint dictionary with both optimizers
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'encoder_optimizer_state_dict': encoder_optimizer.state_dict(),
+            }
+            
+            # Add classifier optimizer state if it exists
+            if classifier_optimizer is not None:
+                checkpoint['classifier_optimizer_state_dict'] = classifier_optimizer.state_dict()
+            
+            torch.save(checkpoint, os.path.join(checkpoint_dir, f"best_bin_spec_model.pth"))
+
+            best_spec_fig = create_combined_conf_mat_plot(
+                multiclass_cm=cm, 
+                binary_cm=cm_binary, 
+                set_name="best val binary specificity", 
+                epoch=epoch+1, 
+                log_to_wandb=True
+            )
+
+
 
         # Generate confusion matrices at visualization intervals
         if (epoch+1) % tsne_interval == 0:
             # Use the accumulated predictions from validation
             with torch.no_grad():
-                # Use validation predictions that were already calculated
-                val_prof_preds = val_metrics['val_prof_preds']
-                val_prof_labels = val_metrics['val_prof_labels']
-                
-                # Create confusion matrix from accumulated predictions
-                cm = get_confusion_matrix(val_prof_preds, val_prof_labels)
-                    
-                # Use consistent binary conversion
-                prof_labels_binary = (val_prof_labels > 0).long()
-                prof_preds_binary = (torch.argmax(val_prof_preds, dim=1) > 0).long()
-                cm_binary = get_confusion_matrix(prof_preds_binary, prof_labels_binary)
-                
+
                 #val_conf_mat_fig = create_conf_mat_plot(cm, clf_name="multiclass_profusion", set_name="validation", epoch=epoch+1, log_to_wandb=True)
                 #val_binary_conf_mat_fig = create_conf_mat_plot(cm_binary, clf_name="binary_profusion", set_name="validation", epoch=epoch+1, log_to_wandb=True)
 
@@ -839,6 +965,10 @@ def train_model_quadruplet(
                 'val_intra_class_distance': val_intra_class_distance,
                 'val_inter_class_distance': val_inter_class_distance,
                 'val_silhouette_score': val_silhouette_score,
+                'val_misclass_conf_mean': np.mean(val_misclass_confidences) if len(val_misclass_confidences) > 0 else 0.0,
+                'val_adj_misclass_conf_mean': np.mean(val_adj_misclass_confidences) if len(val_adj_misclass_confidences) > 0 else 0.0,
+                'train_misclass_conf_mean': np.mean(train_misclass_confidences) if len(train_misclass_confidences) > 0 else 0.0,
+                'train_adj_misclass_conf_mean': np.mean(train_adj_misclass_confidences) if len(train_adj_misclass_confidences) > 0 else 0.0,
             }
             
             # Add training profusion classification metrics
@@ -990,7 +1120,7 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
             
             # Get validation batch
             imgs = sample[0].to(device)
-            labels = sample[1].long().to(device)
+            labels = sample[1].to(device)
             
             # Extract features and normalize embeddings
             features = model.features(imgs)
@@ -1007,8 +1137,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
             prof_preds = val_clf_results['predictions']
             clf_loss = val_clf_results['loss']
 
-            all_prof_labels.append(prof_labels.cpu())
-            all_prof_preds.append(prof_preds.cpu())
+            all_prof_labels.append(prof_labels.detach().cpu())
+            all_prof_preds.append(prof_preds.detach().cpu())
             running_clf_loss += clf_loss.item()
             
             # Get labels from batch
@@ -1111,7 +1241,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
     all_labels = torch.cat(all_labels, dim=0)
     all_prof_preds = torch.cat(all_prof_preds, dim=0)
     all_prof_labels = torch.cat(all_prof_labels, dim=0)
-    
+
+
     # Calculate mAP for full labels
     val_map, val_class_map = helpers.compute_map_per_class(all_embeddings, all_labels)
     
@@ -1124,15 +1255,22 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
     avg_triplet_loss = running_triplet_loss / max(1, batch_with_quadruplets)
     avg_clf_loss = running_clf_loss / max(1, total_batches)  # Always computed
     
+    if wandb.config.active_classifier == "multiclass_profusion":  # TO DO: Check if works
+        # Change the task type
+        task = "multiclass"
+    elif wandb.config.active_classifier == "binary_profusion":
+        # Change the task type
+        task = "binary"
+
     # Calculate classification metrics
     val_prof_metrics = cl_metrics.calculate_classification_metrics(
-        all_prof_preds, all_prof_labels, task_type="multiclass"
+        all_prof_preds, all_prof_labels, task_type=task
     )
     
     # Calculate binary metrics (Prof 0 vs Prof 1-3) - CONSISTENT approach
     val_prof_binary_metrics = cl_metrics.calculate_classification_metrics(
         all_prof_preds, all_prof_labels,  # ✅ Use accumulated data from all batches
-        task_type="multiclass", 
+        task_type=task, 
         binary_target_class="profusion_present"  # ✅ Same binary problem as training
     )
 
@@ -1190,9 +1328,8 @@ def validate_quadruplet(model, val_loader, device, triplet_loss_fn, quadruplet_l
         "val_embedding_ratio": val_embedding_metrics['embedding_ratio'],
         "val_intra_class_distance": val_embedding_metrics['intra_class_distance'],
         "val_inter_class_distance": val_embedding_metrics['inter_class_distance'],
-        "val_silhouette_score": val_embedding_metrics['silhouette_score'],
-        "val_davies_bouldin": val_embedding_metrics['davies_bouldin']
-    }
+        "val_silhouette_score": val_embedding_metrics['silhouette_score']
+                }
 
 
 def test_quadruplet_model(
@@ -1210,6 +1347,7 @@ def test_quadruplet_model(
     lambda_clf=0.25,
     clf_loss_fn=None,
     active_classifier="multiclass_profusion",
+    n_epochs=1000,
 ):
     """
     Comprehensive test function that mirrors validation metrics and provides
@@ -1415,16 +1553,23 @@ def test_quadruplet_model(
     avg_quad_loss = running_quad_loss / max(1, batch_with_quadruplets)
     avg_triplet_loss = running_triplet_loss / max(1, batch_with_quadruplets)
     avg_clf_loss = running_clf_loss / max(1, total_batches)
+
+    if active_classifier == "multiclass_profusion":  # TO DO: Check if works
+        # Change the task type
+        task = "multiclass"
+    elif active_classifier == "binary_profusion":
+        # Change the task type
+        task = "binary"
     
     # Calculate classification metrics
     test_prof_metrics = cl_metrics.calculate_classification_metrics(
-        all_prof_preds, all_prof_labels, task_type="multiclass"
+        all_prof_preds, all_prof_labels, task_type=task
     )
     
     # Calculate binary metrics (Prof 0 vs Prof 1-3) - Same as validation
     test_prof_binary_metrics = cl_metrics.calculate_classification_metrics(
         all_prof_preds, all_prof_labels,
-        task_type="multiclass", 
+        task_type=task, 
         binary_target_class="profusion_present"  # ✅ Same binary problem as validation
     )
     
@@ -1483,8 +1628,14 @@ def test_quadruplet_model(
     # Multiclass profusion confusion matrix
     # And in test_quadruplet_model function:
     cm_multiclass = get_confusion_matrix(all_prof_preds, all_prof_labels)
-    prof_labels_binary = (all_prof_labels > 0).long()
-    prof_preds_binary = (torch.argmax(all_prof_preds, dim=1) > 0).long()
+    if all_prof_preds.dim() > 1:
+        # Multiclass case
+        prof_labels_binary = (all_prof_labels > 0).long()
+        prof_preds_binary = (torch.argmax(all_prof_preds, dim=1) > 0).long()
+    else:
+        # Binary case
+        prof_labels_binary = (all_prof_labels > 0).long()
+        prof_preds_binary = (torch.sigmoid(all_prof_preds) > 0.5).long()
     cm_binary = get_confusion_matrix(prof_preds_binary, prof_labels_binary)
 
     # Use the new combined function
@@ -1492,9 +1643,10 @@ def test_quadruplet_model(
         multiclass_cm=cm_multiclass,
         binary_cm=cm_binary,
         set_name="test",
-        epoch="FINAL",
-        log_to_wandb=log_to_wandb
-    )    
+        epoch=None,
+        log_to_wandb=log_to_wandb,
+        log_tp_tn_fp_fn=False
+    )
 
 
     
@@ -1575,6 +1727,7 @@ def test_quadruplet_model(
         }
     }
 
+
 def compute_classification_loss(model, embeddings, labels, clf_loss_fn=None, active_classifier="multiclass_profusion"):
     """
     Compute classification loss and predictions for profusion classes.
@@ -1600,10 +1753,11 @@ def compute_classification_loss(model, embeddings, labels, clf_loss_fn=None, act
 
     elif active_classifier == "binary_profusion":
         # Extract binary profusion labels (0 or 1)
-        prof_labels = (labels > 0).long()
+        prof_labels = (labels > 0).float().view(-1)
         # Get predictions from binary classifier
-        prof_preds = model.bin_prof_clf(embeddings)
-    
+        prof_preds = model.mc_prof_clf(embeddings).view(-1)
+
+
     else:
         raise ValueError(f"Unsupported active classifier: {active_classifier}")
     
@@ -1611,6 +1765,7 @@ def compute_classification_loss(model, embeddings, labels, clf_loss_fn=None, act
     if clf_loss_fn is None:
         raise ValueError("Classification loss function must be provided.")
     else:
+        # print(f"Preds shape: {prof_preds.shape}\n Labels shape: {prof_labels.shape}")
         clf_loss = clf_loss_fn(prof_preds, prof_labels)
         
     return {
@@ -1618,7 +1773,8 @@ def compute_classification_loss(model, embeddings, labels, clf_loss_fn=None, act
         'predictions': prof_preds,
         'prof_labels': prof_labels
     }
-# Replace the quadruplet formation section in both training and validation
+
+
 def form_strict_quadruplets(embeddings, current_batch_labels, ilo_images, ilo_labels, model, device, p_ilo_anchor, mining_strat, triplet_loss_fn):
     """Form quadruplets with strict requirements - no fallbacks"""
     anchors = []
@@ -1735,6 +1891,7 @@ def form_strict_quadruplets(embeddings, current_batch_labels, ilo_images, ilo_la
         }
     }
 
+
 def can_form_quadruplets(batch_labels, verbose=False):
     """Check if batch can form valid quadruplets"""
     label_counts = np.bincount(batch_labels, minlength=8)
@@ -1769,7 +1926,7 @@ def can_form_quadruplets(batch_labels, verbose=False):
     return False
 
 
-def create_combined_conf_mat_plot(multiclass_cm, binary_cm, set_name, epoch, log_to_wandb=False):
+def create_combined_conf_mat_plot(multiclass_cm, binary_cm, set_name, epoch, log_to_wandb=False, log_tp_tn_fp_fn=True):
     """
     Create a single figure with both binary and multiclass confusion matrices side by side
     
@@ -1874,16 +2031,15 @@ def create_combined_conf_mat_plot(multiclass_cm, binary_cm, set_name, epoch, log
     pe = (((tp + fp) * (tp + fn)) + ((tn + fn) * (tn + fp))) / ((tp + tn + fp + fn) ** 2)
     binary_kappa = (po - pe) / (1 - pe) if pe != 1 else 0.0
     
-
-    if log_to_wandb:
+    if log_tp_tn_fp_fn:
         wandb.log({
             f"{set_name}_TP": tp,
             f"{set_name}_TN": tn,
             f"{set_name}_FP": fp,
             f"{set_name}_FN": fn,
-            "epoch": epoch + 1,
+            "epoch": epoch + 1 if epoch is not None else 0,
         })
-    
+
     metrics_text = f'Accuracy: {accuracy*100:.3f}%\nSensitivity: {sensitivity*100:.3f}%\nSpecificity: {specificity*100:.3f}%\nKappa: {binary_kappa:.3f}'
     ax.text(0.02, 0.98, metrics_text, transform=ax.transAxes, 
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -1897,6 +2053,7 @@ def create_combined_conf_mat_plot(multiclass_cm, binary_cm, set_name, epoch, log
         })
     
     return fig
+
 
 def get_confusion_matrix(predictions, labels):
     """Compute confusion matrix for given predictions and labels"""
@@ -1920,6 +2077,8 @@ def get_confusion_matrix(predictions, labels):
     cm = confusion_matrix(labels_np, pred_classes)
     
     return cm
+
+
 
 def plot_confusion_matrices_combined(prof_preds, prof_labels, set_name, epoch, log_to_wandb=False):
     """
@@ -2032,7 +2191,6 @@ def plot_confusion_matrices_combined(prof_preds, prof_labels, set_name, epoch, l
         })
     
     return fig
-
 
 
 
