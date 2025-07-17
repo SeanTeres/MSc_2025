@@ -122,12 +122,12 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-3', name='Quadruplet_Orig_Paper_n1_mstb-025_mprof',
+        wandb.init(project='MBOD-cl-3', name='Quad_Original-XRV_clf_025-m_02-b32',
             config={
                 "seed": 42,  # ADD THIS
                 "experiment_type": "Quadruplet (Original)",
                 "n2_selection": "Original Paper", # Decide how we select N2 samples (label-based only) ---> Remember, no SH constraints here (for now)
-                "n1_selection": "MSTB-based",
+                "n1_selection": "MSTB-based", # Profusion-based or MSTB-based
                 "prioritize_prof_n1": False,  # Prioritize highest profusion difference for N1 samples
                 "beta_factor": 0.25, # The ratio between the two margins in quadruplet loss
                 "dataset": "MBOD ONLY",
@@ -138,8 +138,9 @@ if __name__ == "__main__":
                 "oversample": True,
                 "OS_factor": 0.5,  # Oversampling factor
                 "initial_margin": 0.05,      
-                "final_margin": 0.5,        
+                "final_margin": 0.2,        
                 "margin_scheduling": True,   # Enable margin scheduling
+                "margin_schedule_scheme": "Epoch-Sine", # Can be None, "Epoch-Sine", "Linear", "Batch-Adaptive"
                 "scheduling_fraction": 0.75,  # Complete scheduling in first x% of training
                 "mining": "BSHN-v2",
                 "augmentations": True,
@@ -151,8 +152,9 @@ if __name__ == "__main__":
                 "p_ilo_scheduling": False,  # Enable p_ilo scheduling
                 "mask_ilo_tb": False,  # Mask ILO TB-based loss
                 "use_classification": True,
-                "active_classifier": "multiclass_profusion",
+                "active_classifier": "multiclass_profusion",  # Options: "multiclass_profusion", "binary_profusion"
                 "lambda_clf": 0.25,  # Weight for classifier loss
+                "weighted_clf_loss": False,  # Use weighted classification loss
             })
         
         experiment_name = wandb.run.name
@@ -160,13 +162,19 @@ if __name__ == "__main__":
         model = xrv.models.ResNet(weights="resnet50-res512-all")
 
         if(wandb.config.use_classification and wandb.config.active_classifier == "multiclass_profusion"):
-            model.mc_prof_clf = cl_utils.MulticlassClassifier(input_dim=2048, num_classes=4, name="MC-Prof", dropout_rate=0.3)
-            classifier_optimizer = torch.optim.Adam(model.mc_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
+            # model.mc_prof_clf = cl_utils.MulticlassClassifier(input_dim=2048, num_classes=4, name="MC-Prof", dropout_rate=0.5)
+
+            model.mc_prof_clf = cl_utils.XRVBasedClassifier(input_dim=2048, num_classes=4, name="XRV-Base")  # Add XRV classifier for 4 classes
+
+            # model.mc_prof_clf = cl_utils.ShallowMulticlassClassifier(input_dim=2048, num_classes=4, name="MC-Prof", dropout_rate=0.5) # TO DO: Check shallower classifier
+            classifier_optimizer = torch.optim.Adam(model.mc_prof_clf.parameters(), 
+                                                    lr=1e-3,  # Changed from 1e-3
+                                                    weight_decay=1e-4)  # Changed from 1e-3
             clf_loss_fn = nn.CrossEntropyLoss()
-            
+
         elif(wandb.config.use_classification and wandb.config.active_classifier == "binary_profusion"):
-            model.bin_prof_clf= cl_utils.BinaryClassifier(input_dim=2048, name="Bin-Prof", dropout_rate=0.3)
-            classifier_optimizer = torch.optim.Adam(model.bin_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
+            model.mc_prof_clf = cl_utils.XRVBasedClassifier(input_dim=2048, num_classes=1, name="XRV-Base")  # Add XRV classifier for 2 classes
+            classifier_optimizer = torch.optim.Adam(model.mc_prof_clf.parameters(), lr=1e-3, weight_decay=1e-4)
             clf_loss_fn = nn.BCEWithLogitsLoss()
 
         model = model.to(device)
@@ -174,6 +182,7 @@ if __name__ == "__main__":
         encoder_optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
 
         triplet_loss_fn = nn.TripletMarginLoss(margin=wandb.config.initial_margin, p=2)
+        
 
         margin_1 = wandb.config.initial_margin
         margin_2 = wandb.config.initial_margin * wandb.config.beta_factor
@@ -267,6 +276,24 @@ if __name__ == "__main__":
                 scaling_factor = wandb.config.OS_factor
             )
 
+        if(wandb.config.weighted_clf_loss and wandb.config.active_classifier == "multiclass_profusion"):
+            # Compute class weights from training set profusion labels
+            profusion_labels = []
+            for batch in train_loader:
+                _, labels = batch
+                profusion_labels.extend((labels % 4).cpu().numpy())  # Only profusion, not TB
+
+            profusion_labels = np.array(profusion_labels)
+            class_counts = np.bincount(profusion_labels, minlength=4)
+            class_weights = 1.0 / (class_counts + 1e-6)  # Avoid division by zero
+            class_weights = class_weights / class_weights.sum()  # Normalize
+
+            class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+            wandb.log({"clf_class_weights": class_weights.tolist()})
+
+            clf_loss_fn = nn.CrossEntropyLoss(weight=class_weights_tensor)
+
         ilo_images = []
         ilo_labels = []
 
@@ -309,7 +336,8 @@ if __name__ == "__main__":
             mining_strat=wandb.config.mining,
             p_ilo_anchor=wandb.config.p_ilo_anchor,
             lambda_clf=wandb.config.lambda_clf,
-            use_classification= wandb.config.use_classification
+            use_classification= wandb.config.use_classification,
+            active_classifier= wandb.config.active_classifier,
         )
 
         test_results = cl_utils.test_quadruplet_model(
@@ -322,6 +350,8 @@ if __name__ == "__main__":
             experiment_name=experiment_name,
             log_to_wandb=True,
             clf_loss_fn=clf_loss_fn if wandb.config.use_classification else None,
+            n_epochs=n_epochs,
+            active_classifier=wandb.config.active_classifier,
 )
 
        
