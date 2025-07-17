@@ -266,7 +266,6 @@ def calculate_classification_metrics(predictions, labels, task_type="multiclass"
         return metrics
     
     elif task_type == "binary":
-        # Your existing binary code...
         probs = torch.sigmoid(predictions.squeeze()).numpy()
         pred_classes = (probs > 0.5).astype(int)
         labels_np = labels.numpy()
@@ -428,3 +427,52 @@ def calculate_embedding_alignment_metrics(embeddings, labels):
         'silhouette_score': silhouette,
         'davies_bouldin_score': davies_bouldin
     }
+
+
+def get_misclassification_confidences(predictions, labels, adjacent_only=False):
+    """
+    Calculate the confidence (predicted probability) of misclassified samples.
+    Optionally, only return confidences for adjacent class confusion.
+
+    Args:
+        predictions: logits tensor of shape [N, num_classes]
+        labels: true labels tensor of shape [N]
+        adjacent_only: if True, only return confidences for adjacent class errors
+
+    Returns:
+        List of confidences for misclassified samples
+    """
+    # Convert logits to probabilities
+    probs = torch.softmax(predictions, dim=1).detach().cpu().numpy()
+    pred_classes = np.argmax(probs, axis=1)
+    true_classes = labels.cpu().numpy()
+
+    confidences = []
+    for i in range(len(true_classes)):
+        if pred_classes[i] != true_classes[i]:
+            if adjacent_only:
+                # Only consider adjacent class confusion
+                if abs(pred_classes[i] - true_classes[i]) == 1:
+                    confidences.append(probs[i, pred_classes[i]])
+            else:
+                confidences.append(probs[i, pred_classes[i]])
+    return confidences
+
+def get_misclassification_confidences_per_class(predictions, labels, adjacent_only=False):
+    """
+    Returns a dict mapping each true class to a list of misclassification confidences for that class.
+    """
+    probs = torch.softmax(predictions, dim=1).detach().cpu().numpy()
+    pred_classes = np.argmax(probs, axis=1)
+    true_classes = labels.cpu().numpy()
+
+    # Initialize dict for each class
+    class_confidences = {c: [] for c in np.unique(true_classes)}
+    for i in range(len(true_classes)):
+        if pred_classes[i] != true_classes[i]:
+            if adjacent_only:
+                if abs(pred_classes[i] - true_classes[i]) == 1:
+                    class_confidences[true_classes[i]].append(probs[i, pred_classes[i]])
+            else:
+                class_confidences[true_classes[i]].append(probs[i, pred_classes[i]])
+    return class_confidences
