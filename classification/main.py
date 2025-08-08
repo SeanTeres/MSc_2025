@@ -8,7 +8,7 @@ import wandb
 import numpy as np
 import yaml
 
-from train_utils import CrossValidator
+from classification.cross_validation import CrossValidator
 
 # Add mbod-data-processor to the Python path
 sys.path.append(os.path.abspath("../mbod-data-processor"))
