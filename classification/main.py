@@ -8,7 +8,7 @@ import wandb
 import numpy as np
 import yaml
 
-from classification.cross_validation import CrossValidator
+from cross_validation import CrossValidator
 
 # Add mbod-data-processor to the Python path
 sys.path.append(os.path.abspath("../mbod-data-processor"))
@@ -42,6 +42,7 @@ SPLIT_FILE = config["SPLIT_FILE"]
 DATA_PATH = config["DATA_PATH"]
 EPOCHS = config["EPOCHS"]
 WEIGHTED_LOSS = config["WEIGHTED_LOSS"]
+CLF_TASK_LABELS_KEY = config["CLF_TASK_LABELS_KEY"]
 
 def load_config(config_path="config.yaml"):
     """
@@ -62,7 +63,7 @@ def load_config(config_path="config.yaml"):
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
     print(f"Using device: {device}")
     print("*" * 50)
@@ -111,20 +112,21 @@ if __name__ == "__main__":
             use_ordinal_labels=USE_ORDINAL_LABELS,
             exp_name=RUN_NAME,
             num_classes=NUM_CLASSES,
-            split_file=SPLIT_FILE
+            split_file=SPLIT_FILE,
+            clf_task_labels_key=CLF_TASK_LABELS_KEY
             )
         
-        ave_acc, ave_sens, ave_spec = cv.run_k_iterations(1,f"{PROJECT_NAME}", exp_name=RUN_NAME, suffix=f"")
-        
+        ave_acc, ave_sens, ave_spec, avg_kappa = cv.run_k_iterations(5,f"{PROJECT_NAME}", exp_name=RUN_NAME, suffix=f"")
+        wandb.finish()
 
         
 # FULL TO DO:
 # 1) Add support for binary profusion, binary tb and maybe multiclass_stb?
-# 2) COHEN's KAPPA must be logged
 # 3) Add support for weighted loss and/or focal loss
 # 4) Make sure we are able to also run this on TB-based datasets (TB-Net, MC, SZ, etc.)
 # 5) t-SNE plots
-# 6) LR scheduler?        
+# 6) COMBINED CONF MAT  ----------------> CANADA
+# 7) LR scheduler?        
         
 
 

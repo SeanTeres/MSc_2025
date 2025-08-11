@@ -122,28 +122,28 @@ def get_accuracy(cm):
 
     return accuracy
 
-def get_cohen_kappa_score(cm):
-    if len(cm.shape) == 3:
-        # Multilabel case
-        kappa_scores = []
-        for i in range(len(cm)):
-            TN, FP, FN, TP = cm[i].ravel()
-            total = TN + FP + FN + TP
-            observed_agreement = (TP + TN) / total if total > 0 else 0
-            expected_agreement = ((TP + FP) * (TP + FN) + (TN + FP) * (TN + FN)) / (total ** 2)
-            kappa = (observed_agreement - expected_agreement) / (1 - expected_agreement) if (1 - expected_agreement) > 0 else 0
-            kappa_scores.append(kappa)
-
-        return np.mean(kappa_scores)
-    else:
-        # Binary and multiclass case
+def get_cohens_kappa(cm):
+    if cm.shape == (2, 2):
+        # Binary case
         TN, FP, FN, TP = cm.ravel()
         total = TN + FP + FN + TP
         observed_agreement = (TP + TN) / total if total > 0 else 0
         expected_agreement = ((TP + FP) * (TP + FN) + (TN + FP) * (TN + FN)) / (total ** 2)
         kappa = (observed_agreement - expected_agreement) / (1 - expected_agreement) if (1 - expected_agreement) > 0 else 0
-
         return kappa
+
+    else:
+        # Multiclass case
+        kappa = []
+        for i in range(len(cm)):
+            TN, FP, FN, TP = get_cm_for_class(cm, i)
+            total = TN + FP + FN + TP
+            observed_agreement = (TP + TN) / total if total > 0 else 0
+            expected_agreement = ((TP + FP) * (TP + FN) + (TN + FP) * (TN + FN)) / (total ** 2)
+            kappa_i = (observed_agreement - expected_agreement) / (1 - expected_agreement) if (1 - expected_agreement) > 0 else 0
+            kappa.append(kappa_i)
+        return np.mean(kappa)
+
 
 
 def cosine_alignment_loss(image_features, text_features, gt_labels, multilabel):
@@ -221,7 +221,7 @@ def compute_binary_clf_metrics (y_true, logits, domain_name, log_to_wandb=False)
     f1 = get_f1_score(cm)
     accuracy = get_accuracy(cm)
     specificity_at_90, _ = specificity_at_sensitivity(y_true, y_pred, min_sens=0.9)
-    kappa = get_cohen_kappa_score(cm)
+    kappa = get_cohens_kappa(cm)
 
     metrics = {
         "specificity": specificity,

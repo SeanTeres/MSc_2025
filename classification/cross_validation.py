@@ -23,12 +23,96 @@ sys.path.append(os.path.abspath("../codev2"))
 sys.path.append(os.path.abspath("../DomainAdaptation"))
 from clf_manager import BinaryClassifier, MulticlassClassifier, XRVBasedClassifier
 
+def plot_tb_stratified_binary_cm(all_labels, all_preds, original_labels):
+    """
+    Create a TB-stratified binary confusion matrix.
+    
+    Args:
+        all_labels: Ground truth profusion labels (0-3)
+        all_preds: Predicted profusion labels (0-3)
+        original_labels: Original multiclass_stb labels (0-7)
+    """
+    # Binarize profusion scores (0 = negative, 1-3 = positive)
+    binary_true = (all_labels > 0).astype(int)
+    binary_pred = (all_preds > 0).astype(int)
+    
+    # Determine TB status
+    tb_status = (original_labels >= 4).astype(int)
+    
+    # Create empty matrix for counts
+    stratified_matrix = np.zeros((4, 2), dtype=int)
+    
+    # Fill the matrix with counts
+    # TP (Profusion+ / Profusion+)
+    tp_mask = (binary_true == 1) & (binary_pred == 1)
+    stratified_matrix[0, 0] = np.sum(tp_mask & (tb_status == 1))  # TB+
+    stratified_matrix[0, 1] = np.sum(tp_mask & (tb_status == 0))  # TB-
+    
+    # FP (Profusion+ / Profusion-)
+    fp_mask = (binary_true == 0) & (binary_pred == 1)
+    stratified_matrix[1, 0] = np.sum(fp_mask & (tb_status == 1))  # TB+
+    stratified_matrix[1, 1] = np.sum(fp_mask & (tb_status == 0))  # TB-
+    
+    # FN (Profusion- / Profusion+)
+    fn_mask = (binary_true == 1) & (binary_pred == 0)
+    stratified_matrix[2, 0] = np.sum(fn_mask & (tb_status == 1))  # TB+
+    stratified_matrix[2, 1] = np.sum(fn_mask & (tb_status == 0))  # TB-
+    
+    # TN (Profusion- / Profusion-)
+    tn_mask = (binary_true == 0) & (binary_pred == 0)
+    stratified_matrix[3, 0] = np.sum(tn_mask & (tb_status == 1))  # TB+
+    stratified_matrix[3, 1] = np.sum(tn_mask & (tb_status == 0))  # TB-
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Define labels
+    row_labels = [
+        "TP (Profusion+ / Profusion+)",
+        "FP (Profusion+ / Profusion-)",
+        "FN (Profusion- / Profusion+)", 
+        "TN (Profusion- / Profusion-)"
+    ]
+    col_labels = ["TB+", "TB-"]
+    
+    # Create heatmap
+    im = ax.imshow(stratified_matrix, cmap="YlGnBu")
+    
+    # Add colorbar
+    cbar = ax.figure.colorbar(im, ax=ax)
+    cbar.ax.set_ylabel("Count", rotation=-90, va="bottom")
+    
+    # Show all ticks and label them
+    ax.set_xticks(np.arange(len(col_labels)))
+    ax.set_yticks(np.arange(len(row_labels)))
+    ax.set_xticklabels(col_labels)
+    ax.set_yticklabels(row_labels)
+    
+    # Label the axes
+    ax.set_xlabel("TB+ Status")
+    ax.set_ylabel("Predicted vs True Profusion")
+    
+    # Rotate the tick labels and set alignment
+    plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
+    
+    # Add text annotations in each cell
+    for i in range(len(row_labels)):
+        for j in range(len(col_labels)):
+            ax.text(j, i, stratified_matrix[i, j], 
+                   ha="center", va="center", color="black")
+    
+    plt.title("TB-stratified Custom Confusion Matrix")
+    plt.tight_layout()
+    
+    return fig
+
+
 def plot_combined_conf_mat(confusion_matrix):
     if confusion_matrix.shape == (2, 2):
         # Binary case
         fig = plt.figure(figsize=(12, 8))
         cm_display = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix, display_labels=[0, 1])
-        cm_display.plot(ax=plt.gca())
+        cm_display.plot(ax=plt.gca(), cmap='Blues')
         plt.title("Confusion Matrix")
     elif len(confusion_matrix.shape) == 3:
         # Multilabel case
@@ -36,7 +120,7 @@ def plot_combined_conf_mat(confusion_matrix):
         norm_cm = avg_cm / (np.sum(avg_cm, axis=1, keepdims=True))
         fig = plt.figure(figsize=(12, 8))
         cm_display = sklearn.metrics.ConfusionMatrixDisplay(norm_cm, display_labels=[0, 1])
-        cm_display.plot(ax=plt.gca())
+        cm_display.plot(ax=plt.gca(), cmap='Blues')
         plt.title("Normalised Multilabel Confusion Matrix")
     else:
         # Multiclass case
@@ -46,16 +130,16 @@ def plot_combined_conf_mat(confusion_matrix):
         display_labels = [i for i in range(len(confusion_matrix[0]))]
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
         cm_display1 = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix, display_labels=display_labels)
-        cm_display1.plot(ax=axes[0], colorbar=False)
+        cm_display1.plot(ax=axes[0], colorbar=False, cmap='Blues')
         axes[0].set_title("Confusion Matrix")
         cm_display2 = sklearn.metrics.ConfusionMatrixDisplay(bin_conf_matrix, display_labels=[0, 1])
-        cm_display2.plot(ax=axes[1], colorbar=False)
+        cm_display2.plot(ax=axes[1], colorbar=False, cmap='Blues')
         axes[1].set_title("Binary Confusion Matrix")
         plt.tight_layout()
     return fig
 
 class CrossValidator:
-    def __init__(self, model, labels_key, num_classes, device, loss_fn, hdf5_path, batch_size, epochs, optimizer_type, learning_rate, weight_decay, use_oversampling, checkpoint_save_target, use_multilabel, use_multiclass, use_ordinal_labels, exp_name, split_file):
+    def __init__(self, model, labels_key, num_classes, device, loss_fn, hdf5_path, batch_size, epochs, optimizer_type, learning_rate, weight_decay, use_oversampling, checkpoint_save_target, use_multilabel, use_multiclass, use_ordinal_labels, exp_name, split_file, clf_task_labels_key):
         self.model = model
         self.labels_key = labels_key
         self.device = device
@@ -80,7 +164,9 @@ class CrossValidator:
         T.ToTensor(),
         # transforms.Normalize(mean=[0.5], std=[0.5])
         ])
+        self.clf_task_labels_key = clf_task_labels_key
         
+        checkpoint_save_target = f"{checkpoint_save_target}/{self.exp_name}"
 
         if not (os.path.isdir(checkpoint_save_target)):
             os.makedirs(checkpoint_save_target)
@@ -145,10 +231,16 @@ class CrossValidator:
         all_probs = []
         all_feats = []
         all_preds = []
+        all_original_labels = []
 
         with torch.no_grad():
 
             for batch_imgs, batch_labels in tqdm(loader):
+
+                all_original_labels.append(batch_labels)
+
+                if(self.clf_task_labels_key=="profusion_score" and self.labels_key=="multiclass_stb"):
+                    batch_labels = batch_labels % 4
 
                 batch_imgs, batch_labels = batch_imgs.to(self.device), batch_labels.to(self.device)
 
@@ -158,27 +250,30 @@ class CrossValidator:
 
                 loss = self.loss_fn(logits, batch_labels)
 
+                # Calculate probabilities and predictions correctly
                 if self.use_multiclass:
                     loc_probs = torch.softmax(logits, dim=1)
                     all_probs.append(loc_probs.cpu().numpy())
+                    # For multiclass, argmax is correct
+                    all_preds.append(logits.argmax(dim=1).cpu().numpy())
                 elif self.num_classes == 2:
                     loc_probs = torch.sigmoid(logits)
                     all_probs.append(loc_probs.cpu().numpy())
+                    # For binary, threshold the sigmoid output
+                    binary_preds = (loc_probs > 0.5).int()
+                    all_preds.append(binary_preds.cpu().numpy())
                 else:
-                    raise ValueError("wrong activation - Only binary and multiclass classification supported.")
-
-                assert not torch.isnan(loc_probs).any(), f"NaN in locprobabilities, logits: {logits}"
-                assert not torch.isinf(loc_probs).any(), f"Inf in locprobabilities, logits: {logits}"
-
+                    raise ValueError("Wrong activation - Only binary and multiclass classification supported.")
+                    
                 all_labels.append(batch_labels.cpu().numpy())
                 all_feats.append(feats.cpu().numpy())
-                all_preds.append(logits.argmax(dim=1).cpu().numpy())
 
 
                     
         all_labels = np.concatenate(all_labels, axis=0)
         all_probs = np.concatenate(all_probs, axis=0)
         all_preds = np.concatenate(all_preds, axis=0)
+        all_original_labels = np.concatenate(all_original_labels, axis=0)
 
         if self.use_multiclass:
             spec_at_09_sens, thresh = metrics.multiclass_specificity_at_sensitivity(all_labels, all_probs, min_sens=0.9)
@@ -209,6 +304,7 @@ class CrossValidator:
         sensitivity = metrics.get_sensitivity(global_conf_mat)
         specificity = metrics.get_specificity(global_conf_mat)
         f1 = metrics.get_f1_score(global_conf_mat)
+        kappa = metrics.get_cohens_kappa(global_conf_mat)
 
 
         if self.use_multilabel:
@@ -230,6 +326,15 @@ class CrossValidator:
 
         comb_cm = plot_combined_conf_mat(global_conf_mat)
 
+
+        if (self.labels_key == "multiclass_stb" or self.labels_key == "profusion_score") and len(all_original_labels) > 0:
+
+            tb_strat_cm = plot_tb_stratified_binary_cm(all_labels, all_preds, all_original_labels)
+
+            wandb.log({
+                f"cm/{name}tb_stratified_cm": wandb.Image(tb_strat_cm)
+            }, step=epoch)
+
         if global_conf_mat.shape != (2,2) and (not self.use_multilabel):
             tn, fp, fn, tp = metrics.get_cm_for_class(global_conf_mat, 0)
 
@@ -240,10 +345,11 @@ class CrossValidator:
             bin_sens = metrics.get_sensitivity(bin_cm)
             bin_spec = metrics.get_specificity(bin_cm)
             bin_f1 = metrics.get_f1_score(bin_cm)
+            bin_kappa = metrics.get_cohens_kappa(bin_cm)
         else:
-            bin_acc, bin_sens, bin_spec, bin_f1 = None, None, None, None
-        
-        return accuracy, sensitivity, specificity, f1, bin_acc, bin_sens, bin_spec, bin_f1, comb_cm, average_auc, 
+            bin_acc, bin_sens, bin_spec, bin_f1, bin_kappa = None, None, None, None, None
+
+        return accuracy, sensitivity, specificity, kappa, f1, bin_acc, bin_sens, bin_spec, bin_kappa, bin_f1, comb_cm, average_auc,
 
     def train(self, train_split=None, iteration=None):
         best_val_specificity = 0
@@ -272,6 +378,9 @@ class CrossValidator:
             total = 0
 
             for batch_imgs, batch_labels in tqdm(train_loader):
+                if(self.clf_task_labels_key=="profusion_score" and self.labels_key=="multiclass_stb"):
+                    batch_labels = batch_labels % 4
+
 
                 batch_imgs, batch_labels = batch_imgs.to(self.device), batch_labels.to(self.device)
 
@@ -297,61 +406,67 @@ class CrossValidator:
                 epoch_loss += loss.item()
                 total += batch_labels.size(0)
 
-            train_acc, train_sens, train_spec, train_f1, train_bin_acc, train_bin_sens, train_bin_spec, train_bin_f1, comb_conf, train_average_auc = self.evaluate(train_loader, epoch, iteration, name="train_")
+            train_acc, train_sens, train_spec, train_kappa, train_f1, train_bin_acc, train_bin_sens, train_bin_spec, train_bin_kappa, train_bin_f1, comb_conf, train_average_auc = self.evaluate(train_loader, epoch, iteration, name="train_")
 
 
             if train_bin_acc:
                 wandb.log({
-                    "train_loss": epoch_loss/total,
+                    "train/loss": epoch_loss/total,
                     "fold": iteration,
-                    "train_acc":train_acc,
-                    "train_sens":train_sens,
-                    "train_spec":train_spec,
-                    "train_f1":train_f1,
-                    "train_bin_acc":train_bin_acc,
-                    "train_bin_spec":train_bin_spec,
-                    "train_bin_sens":train_bin_sens,
-                    "train_bin_f1":train_bin_f1,
-                    "train_cm":wandb.Image(comb_conf)}, 
+                    "train/acc":train_acc,
+                    "train/sens":train_sens,
+                    "train/spec":train_spec,
+                    "train/kappa": train_kappa,
+                    "train/f1":train_f1,
+                    "train/bin_acc":train_bin_acc,
+                    "train/bin_kappa": train_bin_kappa,
+                    "train/bin_spec":train_bin_spec,
+                    "train/bin_sens":train_bin_sens,
+                    "train/bin_f1":train_bin_f1,
+                    "cm/train":wandb.Image(comb_conf)}, 
                 step=epoch)
             
             else:
                 wandb.log({
-                    "train_loss": epoch_loss/total,
+                    "train/loss": epoch_loss/total,
                     "fold": iteration,
-                    "train_acc": train_acc,
-                    "train_sens": train_sens,
+                    "train/acc": train_acc,
+                    "train/sens": train_sens,
                     "train_spec": train_spec,
-                    "train_f1": train_f1,
-                    "train_auc": train_average_auc,
-                    "train_cm": wandb.Image(comb_conf)
+                    "train/kappa": train_kappa,
+                    "train/f1": train_f1,
+                    "train/auc": train_average_auc,
+                    "cm/train": wandb.Image(comb_conf)
                 }, step=epoch)
             plt.close(comb_conf)
 
-            val_acc, val_sens, val_spec, val_f1, val_bin_acc, val_bin_sens, val_bin_spec, val_bin_f1, val_comb_conf, val_average_auc = self.evaluate(val_loader, epoch, iteration, name="val_")
+            val_acc, val_sens, val_spec, val_kappa, val_f1, val_bin_acc, val_bin_sens, val_bin_spec, val_bin_kappa, val_bin_f1, val_comb_conf, val_average_auc = self.evaluate(val_loader, epoch, iteration, name="val_")
 
 
             if val_bin_acc:
                 wandb.log({
-                    "val_acc": val_acc,
-                    "val_sens": val_sens,
-                    "val_spec": val_spec,
-                    "val_f1": val_f1,
-                    "val_bin_acc": val_bin_acc,
-                    "val_bin_sens": val_bin_sens,
-                    "val_bin_spec": val_bin_spec,
-                    "val_bin_f1": val_bin_f1,
-                    "val_cm": wandb.Image(val_comb_conf)
+                    "val/acc": val_acc,
+                    "val/sens": val_sens,
+                    "val/spec": val_spec,
+                    "val/kappa": val_kappa,
+                    "val/f1": val_f1,
+                    "val/bin_acc": val_bin_acc,
+                    "val/bin_sens": val_bin_sens,
+                    "val/bin_spec": val_bin_spec,
+                    "val/bin_kappa": val_bin_kappa,
+                    "val/bin_f1": val_bin_f1,
+                    "cm/val": wandb.Image(val_comb_conf)
                 }, step=epoch)
 
             else:
                 wandb.log({
-                    "val_acc": val_acc,
-                    "val_sens": val_sens,
-                    "val_spec": val_spec,
-                    "val_f1": val_f1,
-                    "val_auc": val_average_auc,
-                    "val_cm": wandb.Image(val_comb_conf)
+                    "val/acc": val_acc,
+                    "val/sens": val_sens,
+                    "val/spec": val_spec,
+                    "val/kappa": val_kappa,
+                    "val/f1": val_f1,
+                    "val/auc": val_average_auc,
+                    "cm/val": wandb.Image(val_comb_conf)
                 }, step=epoch)
 
             plt.close(comb_conf)
@@ -360,7 +475,7 @@ class CrossValidator:
                 print(f"New best val spec: {val_spec} at epoch {epoch}, previous best: {best_val_specificity}")
                 best_val_specificity = val_spec
                 epochs_without_improvement = 0
-                torch.save(self.model.state_dict(), f"{self.checkpoint_save_target}/{epoch}-{val_spec}-{iteration}.pth")
+                torch.save(self.model.state_dict(), f"{self.checkpoint_save_target}/{epoch}-{val_spec}-{iteration:.4f}.pth")
             else:
                 epochs_without_improvement += 1
                 print(f"No improvement in val spec: {val_spec} at epoch {epoch}, previous best: {best_val_specificity}. Epochs without improvement: {epochs_without_improvement}")
@@ -370,26 +485,32 @@ class CrossValidator:
                     break
 
 
-        test_acc, test_sens, test_spec, test_f1, test_bin_acc, test_bin_sens, test_bin_spec, test_bin_f1, comb_conf, test_average_auc = self.evaluate(test_loader, epoch, iteration, name="test_")
+        test_acc, test_sens, test_spec, test_kappa, test_f1, test_bin_acc, test_bin_sens, test_bin_spec, test_bin_kappa, test_bin_f1, comb_conf, test_average_auc = self.evaluate(test_loader, epoch, iteration, name="test_")
 
         if iteration is None:
             torch.save(self.model.state_dict(), f"{self.checkpoint_save_target}/final_model.pth")
         else:
             torch.save(self.model.state_dict(), f"{self.checkpoint_save_target}/final_model_{iteration}.pth")
 
-        return test_acc, test_sens, test_spec, test_f1, test_bin_acc, test_bin_sens, test_bin_spec, test_bin_f1, comb_conf, test_average_auc
+        return test_acc, test_sens, test_spec, test_kappa, test_f1, test_bin_acc, test_bin_sens, test_bin_spec, test_bin_kappa, test_bin_f1, comb_conf, test_average_auc
 
     def run_k_iterations(self, k, project_name, exp_name, suffix=''):
         accuracies = []
         sensitivities = []
         specificities = []
+        kappas = []
 
         wandb.login()
+        group_name = f"{self.checkpoint_save_target}/{self.exp_name}-{suffix}-{wandb.util.generate_id()}"
+
+
 
         for i in range(k):
+            
             wandb.init(
                 project=project_name,
-                name=exp_name,
+                group=group_name,
+                name=f"{exp_name}-fold_{i}",
                 config={
                     "loss_fn": self.loss_fn.__class__.__name__,
                     "optimizer": self.optimizer_type.__name__,
@@ -403,29 +524,33 @@ class CrossValidator:
                 },
             )
 
-            acc, sens, spec, f1, bin_acc, bin_sens, bin_spec, bin_f1, comb_conf, average_auc = self.train(iteration=i)
+            acc, sens, spec, kappa, f1, bin_acc, bin_sens, bin_spec, bin_kappa, bin_f1, comb_conf, average_auc = self.train(iteration=i)
             accuracies.append(acc)
             sensitivities.append(sens)
             specificities.append(spec)
+            kappas.append(kappa)
 
             if bin_acc:
-                wandb.log({"test_accuracy": acc,
-                        "test_sensitivity": sens,
-                        "test_specificity": spec,
-                        "test_f1": f1,
-                        "test_auc": average_auc,
-                        "test_bin_accuracy": bin_acc,
-                        "test_bin_sensitivity": bin_sens,
-                        "test_bin_specificity": bin_spec,
-                        "test_bin_f1": bin_f1,
-                        "test_confusion_matrix": wandb.Image(comb_conf)})
+                wandb.log({"test/accuracy": acc,
+                        "test/sensitivity": sens,
+                        "test/specificity": spec,
+                        "test/f1": f1,
+                        "test/auc": average_auc,
+                        "test/kappa": kappa,
+                        "test/bin_accuracy": bin_acc,
+                        "test/bin_sensitivity": bin_sens,
+                        "test/bin_specificity": bin_spec,
+                        "test/bin_f1": bin_f1,
+                        "test/bin_kappa"
+                        "cm/test": wandb.Image(comb_conf)})
             else:
-                wandb.log({"test_accuracy": acc,
-                        "test_sensitivity": sens,
-                        "test_specificity": spec,
-                        "test_f1": f1,
-                        "test_auc": average_auc,
-                        "test_confusion_matrix": wandb.Image(comb_conf)})
+                wandb.log({"test/accuracy": acc,
+                        "test/sensitivity": sens,
+                        "test/specificity": spec,
+                        "test/f1": f1,
+                        "test/kappa": kappa,
+                        "test/auc": average_auc,
+                        "cm/test": wandb.Image(comb_conf)})
 
             plt.close(comb_conf)
             wandb.finish()
@@ -433,15 +558,18 @@ class CrossValidator:
         avg_accuracy = np.mean(accuracies)
         avg_sensitivity = np.mean(sensitivities)
         avg_specificity = np.mean(specificities)
+        avg_kappa = np.mean(kappas)
 
         print(f"\nResults over {k} iterations:")
         print(f"Average Test Accuracy: {avg_accuracy:.2f}")
         print(f"Average Sensitivity (True Positive Rate): {avg_sensitivity:.2f}")
         print(f"Average Specificity (True Negative Rate): {avg_specificity:.2f}")
+        print(f"Average Kappa: {avg_kappa:.2f}")
 
-        print("Per run stats (accuracy, sensitity, specificity):")
+        print("Per run stats (accuracy, sensitity, specificity, kappa):")
         print(accuracies)
         print(sensitivities)
         print(specificities)
+        print(kappas)
 
-        return avg_accuracy, avg_sensitivity, avg_specificity
+        return avg_accuracy, avg_sensitivity, avg_specificity, avg_kappa
