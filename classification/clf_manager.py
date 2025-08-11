@@ -8,7 +8,6 @@ from sklearn.metrics import accuracy_score, f1_score, cohen_kappa_score, precisi
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
-import seaborn as sns
 
 
 class ClassifierBase(nn.Module, ABC):
