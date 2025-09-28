@@ -9,6 +9,8 @@ __pycache__/
 *.venv
 results/
 checkpoints/
+code/
+mbod-data-processor/
 plots/
 3D_plots/
 *.html
@@ -17,6 +19,8 @@ plots/
 *.csv
 *.h5
 datasets/
-code/
-plots/
-mbod-data-processor/
+medvae/
+.claude/
+*.md
+/home/sean/MSc_2025/classification/
+CheSS/
