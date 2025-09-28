@@ -1,0 +1,47 @@
+PROJECT_NAME: "contrastive-new"
+RUN_NAME: "trip-clf-test-OS"
+
+SPLIT_FILE_MBOD: "/home/sean/MSc_2025/mbod-data-processor/stratified_split_MBOD_mlabel_stb.json"
+SPLIT_FILE_MCSZ: "/home/sean/MSc_2025/domain_adaptation/stratified_split_mc_sz_TB.json"
+SPLIT_FILE_TBNET: "/home/sean/MSc_2025/mbod-data-processor/stratified_split_kaggle_tb.json"
+
+DATA_PATH_MBOD: "/home/sean/MSc_2025/mbod-data-processor/mbod_dataset_512_multilabel_stb.h5"
+DATA_PATH_MCSZ: "/home/sean/MSc_2025/mbod-data-processor/mc_sz_combined_512.h5"
+DATA_PATH_ILO: "/home/sean/MSc_2025/mbod-data-processor/ilo_dataset_512.h5"
+DATA_PATH_MC: "/home/sean/MSc_2025/mbod-data-processor/montgomery_tb_dataset.h5"
+DATA_PATH_SZ: "/home/sean/MSc_2025/mbod-data-processor/shenzhen_tb_dataset.h5"
+DATA_PATH_TBNET: "/home/sean/MSc_2025/mbod-data-processor/kaggle_tb_dataset_mstb_new.h5"
+
+LABELS_KEY_MBOD: "multiclass_stb"
+LABELS_KEY_MCSZ: "tuberculosis"
+LABELS_KEY_ILO: "profusion_score"
+
+NUM_FOLDS: 2
+OVERSAMPLE: true
+BATCH_SIZE: 16
+EPOCHS: 500
+TSNE_INTERVAL: 10
+
+LEARNING_RATE: 0.0001
+DISTANCE_METRIC: "Cosine"
+OPTIMIZER: "Adam"
+PRETRAINED: true
+FREEZE_ENC: false
+
+EXP_NAME: "Triplet"
+INITIAL_MARGIN: 0.05
+FINAL_MARGIN: 0.3
+MARGIN_BETA_FACTOR: 0.25
+MARGIN_SCHEDULING: true
+SCHEDULING_FRACTION: 0.75
+
+P_ILO_ANCHOR: 0.0
+P_ILO_FINAL: 0.5
+MINING_STRATEGY: "BSHN"
+N1_SELECTION: "Profusion-based"
+N2_SELECTION: "Proposed"
+
+NUM_CLASSES: 4
+USE_MULTICLASS: true
+LAMBDA_CLF: 0.15
+

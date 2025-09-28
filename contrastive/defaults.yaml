@@ -1,0 +1,13 @@
+
+#----------------------#----------------------#----------------------#----------------------
+# DEFAULT VARIABLES AND STUFF
+#----------------------#----------------------#----------------------#----------------------
+
+WANDB_API_KEY: 
+  value: '176da722bd80e35dbc4a8cea0567d495b7307688'
+
+RANDOM_SEED: 
+  value: 42
+
+DATA_CONFIG:
+  path: "/home/sean/MSc_2025/mbod-data-processor/config.yaml"

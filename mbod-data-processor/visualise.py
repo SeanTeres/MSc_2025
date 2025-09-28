@@ -58,11 +58,20 @@ if __name__ == "__main__":
             transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), fill=0)
         ])
 
+        def normalize_to_hu_range(img_tensor):
+            """Normalize image tensor to Hounsfield Unit range (-1024, 1024)"""
+            min_val = img_tensor.min()
+            max_val = img_tensor.max()
+            
+            # Scale to [0,1]
+            normalized = (img_tensor - min_val) / (max_val - min_val)
+            
+            # Scale to [-1024, 1024]
+            return normalized * 2048 - 1024
+        
         preprocess = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.LANCZOS),
-            transforms.Grayscale(),
             transforms.ToTensor(),
-            # transforms.Normalize(mean=[0.5], std=[0.5])
+            transforms.Lambda(normalize_to_hu_range)  # Scale [0,1] to [-1024,1024]
         ])
 
         dataset = HDF5Dataset(

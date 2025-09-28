@@ -71,41 +71,54 @@ def stratify(dataset):
         dataset: The HDF5 dataset to visualize.
     """
 
-    prof_labels = get_label_scheme_supports(dataset, 'profusion_score')
+    #prof_labels = get_label_scheme_supports(dataset, 'profusion_score')
     tb_labels = get_label_scheme_supports(dataset, 'tuberculosis')
-    s_labels = [1 if x > 0 else 0 for x in prof_labels]
-    tb_s_labels = np.logical_and(tb_labels, s_labels)
+    #s_labels = [1 if x > 0 else 0 for x in prof_labels]
+    #tb_s_labels = np.logical_and(tb_labels, s_labels)
+    # mstb_labels = get_label_scheme_supports(dataset, 'multiclass_stb')
 
-    _, prof_support = np.unique(prof_labels, return_counts=True)
-    _, tb_support = np.unique(tb_labels, return_counts=True)
-    _, s_support = np.unique(s_labels, return_counts=True)
-    _, tb_s_support = np.unique(tb_s_labels, return_counts=True)
+    #_, prof_support = np.unique(prof_labels, return_counts=True)
+    tb_unique, tb_support = np.unique(tb_labels, return_counts=True)
+    #s_unique, s_support = np.unique(s_labels, return_counts=True)
+    #tb_s_unique, tb_s_support = np.unique(tb_s_labels, return_counts=True)
+    # mstb_unique, mstb_support = np.unique(mstb_labels, return_counts=True)
 
-    indexes = [i for i in range(len(prof_labels))]
+    print("TB label counts:")
+    for label, count in zip(tb_unique, tb_support):
+        print(f"Label {label}: {count}")
+
+
+
+
+    indexes = [i for i in range(len(tb_labels))]
     labels = []
 
     for i in indexes:
         lab = [0, 0, 0, 0, 0, 0, 0]
-        lab[prof_labels[i]] = 1
+        #lab[prof_labels[i]] = 1
         lab[4] = 1 if tb_labels[i] == 1 else 0
-        lab[5] = 1 if s_labels[i] == 1 else 0
-        lab[6] = 1 if tb_s_labels[i] else 0
+        #lab[5] = 1 if s_labels[i] == 1 else 0
+        #lab[6] = 1 if tb_s_labels[i] else 0
         labels.append(lab)
 
     print("=======TB==========")
     print(tb_support)
 
     print("=======SILICOSIS==========")
-    print(s_support)
+    #print(s_support)
 
     print("=======PROFUSION SCORES==========")
-    print(prof_support)
+    #print(prof_support)
 
     print("======TB_SILICOSIS===========")
-    print(tb_s_support)
+    #print(tb_s_support)
+
+    print("======MSTB=======")
+    # print(mstb_support)
 
     print("======OHE=======")
     print(np.sum(labels, axis=0))
+
 
     test_split = iter_strat(indexes, labels, 300)
 
@@ -116,8 +129,12 @@ def stratify(dataset):
 
     train_split = [i for i in remaining_indexes if i not in val_split]
     train_labels = [labels[i] for i in train_split]
+    val_labels = [labels[i] for i in val_split]
+    test_labels = [labels[i] for i in test_split]
 
     print(np.sum(train_labels, axis=0))
+    print(np.sum(val_labels, axis=0))
+    print(np.sum(test_labels, axis=0))
 
     print("================")
     print(train_split)
@@ -134,7 +151,7 @@ def stratify(dataset):
         {"train": train_split,
          "val": val_split,
          "test": test_split},
-        "stratified_split.json",
+        "stratified_split_rand_tb.json",
     )
 
 
@@ -142,8 +159,8 @@ if __name__ == "__main__":
     np.random.seed(42)
     config = load_config()
     try:
-        dataset_path = config["dataset_check"]["hdf5_file"]
-        chosen_label_scheme = config["dataset_check"]["label_scheme"]
+        dataset_path = config["rand_output"]["hdf5_file"]
+        chosen_label_scheme = "tuberculosis"
 
         dataset = HDF5Dataset(
             hdf5_path=dataset_path,

@@ -119,3 +119,21 @@ class ILOImagesDataset(Dataset):
             pixel_tensor = self.transform(pixel_tensor)
 
         return pixel_tensor, label, filename
+    
+class BaseClassifier512(nn.Module):
+    def __init__(self, in_features):
+        super(BaseClassifier512, self).__init__()
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(in_features, 1024)  # Input size is 1024
+        self.fc2 = nn.Linear(1024, 512)            # Additional hidden layer
+        self.fc3 = nn.Linear(512, 256)
+        self.fc4 = nn.Linear(256, 1)
+    
+
+    def forward(self, x):
+        x = self.flatten(x)  # Flatten the input
+        x = F.relu(self.fc1(x))  # First hidden layer
+        x = F.relu(self.fc2(x))  # Second hidden layer
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)  # Output layer
+        return x

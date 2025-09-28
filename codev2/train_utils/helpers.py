@@ -4,6 +4,7 @@ import torch
 import torchvision.transforms as transforms
 from skimage.color import rgb2gray
 import torch.nn.functional as F
+from sklearn import metrics
 
 def salt_and_pepper_noise_tensor(image, prob=0.02):
     """
@@ -85,34 +86,6 @@ def compute_pairwise_distances(embeddings, metric='cosine'):
 
     return dist_matrix
 
-    """
-    For each image in the batch, select all non-matching samples (images with a different label).
-    
-    Parameters:
-    - img: Tensor of shape (batch_size, C, H, W), batch of images
-    - lab: Tensor of shape (batch_size,), labels corresponding to the images
-    
-    Returns:
-    - all_negative_images: List of tensors where each element is a tensor of non-matching images for each image in the batch
-    - all_negative_labels: List of tensors where each element is a tensor of labels corresponding to the non-matching images
-    """
-    all_negative_images = []
-    all_negative_labels = []
-    
-    # Iterate over the images and labels
-    for i, batch_label in enumerate(lab):
-        # Get indices of all images that do not have the same label as the current image
-        non_matching_indices = torch.nonzero(lab != batch_label).squeeze(1).to(img.device)
-
-        # Get all non-matching images and their corresponding labels
-        negative_images = img[non_matching_indices]
-        negative_labels = lab[non_matching_indices]
-        
-        # Append to the result lists
-        all_negative_images.append(negative_images)
-        all_negative_labels.append(negative_labels)
-    
-    return non_matching_indices
 
 def compute_map_per_class(embeddings, labels):
     from sklearn.metrics import average_precision_score
@@ -149,6 +122,7 @@ def compute_map_per_class(embeddings, labels):
             class_map[int(class_id)] = np.mean(aps)
 
     overall_map = np.mean(list(class_map.values()))
+    
     return overall_map, class_map
 
 # After initializing your dataset and before creating the model
@@ -195,3 +169,168 @@ def calculate_class_weights(train_loader, num_classes=4, dampening_factor=0.5):
         print(f"Class {i}: raw={raw_weights[i]:.4f}, dampened={dampened_weights[i]:.4f}")
     
     return dampened_weights
+
+def compute_sensitivity_at_specificity(embeddings, labels, specificity_target=0.95):
+    """
+    Compute sensitivity at a given specificity threshold for each class.
+    
+    Args:
+        embeddings: Normalized embeddings tensor
+        labels: Ground truth labels
+        specificity_target: Target specificity value (default: 0.95)
+    
+    Returns:
+        overall_sensitivity: Average sensitivity across all classes
+        class_sensitivities: Dictionary with sensitivity for each class
+    """
+    # Convert to numpy for sklearn
+    embeddings_np = embeddings.cpu().numpy()
+    labels_np = labels.cpu().numpy()
+    
+    # Get unique class labels
+    unique_labels = np.unique(labels_np)
+    n_classes = len(unique_labels)
+    
+    # Calculate similarity matrix (cosine similarity)
+    sim_matrix = np.matmul(embeddings_np, embeddings_np.T)
+    
+    class_sensitivities = {}
+    class_counts = []
+    
+    # For each class
+    for class_label in unique_labels:
+        # Identify samples of this class
+        class_mask = (labels_np == class_label)
+        class_indices = np.where(class_mask)[0]
+        
+        # Skip if too few samples
+        if len(class_indices) < 2:
+            class_sensitivities[int(class_label)] = 0.0
+            continue
+            
+        # Calculate sensitivities for each sample in this class
+        sensitivities = []
+        
+        for idx in class_indices:
+            # Create binary labels (1 for same class, 0 for different class)
+            # Exclude the current sample itself
+            other_indices = np.arange(len(labels_np))
+            other_indices = other_indices[other_indices != idx]
+            
+            binary_labels = (labels_np[other_indices] == class_label).astype(int)
+            scores = sim_matrix[idx, other_indices]
+            
+            # Skip if no positive or negative samples
+            if np.sum(binary_labels) == 0 or np.sum(binary_labels) == len(binary_labels):
+                continue
+                
+            # Calculate ROC curve
+            fpr, tpr, thresholds = metrics.roc_curve(binary_labels, scores)
+            
+            # Get specificity = 1 - fpr
+            specificity = 1 - fpr
+            
+            # Find threshold closest to target specificity without going below it
+            valid_indices = np.where(specificity >= specificity_target)[0]
+            if len(valid_indices) > 0:
+                # Get index where specificity is closest to target
+                closest_idx = valid_indices[np.argmin(np.abs(specificity[valid_indices] - specificity_target))]
+                sample_sensitivity = tpr[closest_idx]
+                sensitivities.append(sample_sensitivity)
+        
+        # Calculate mean sensitivity for this class
+        if sensitivities:
+            class_sensitivities[int(class_label)] = float(np.mean(sensitivities))
+            class_counts.append(len(sensitivities))
+        else:
+            class_sensitivities[int(class_label)] = 0.0
+    
+    # Calculate overall sensitivity, weighted by number of samples per class
+    valid_sensitivities = [sens for cls, sens in class_sensitivities.items() if sens > 0]
+    if valid_sensitivities:
+        overall_sensitivity = float(np.mean(valid_sensitivities))
+    else:
+        overall_sensitivity = 0.0
+    
+    return overall_sensitivity, class_sensitivities
+
+def compute_specificity_at_sensitivity(embeddings, labels, sensitivity_target=0.90):
+    """
+    Compute specificity at a given sensitivity threshold for each class.
+    
+    Args:
+        embeddings: Normalized embeddings tensor
+        labels: Ground truth labels
+        sensitivity_target: Target sensitivity value (default: 0.90)
+    
+    Returns:
+        overall_specificity: Average specificity across all classes
+        class_specificities: Dictionary with specificity for each class
+    """
+    # Convert to numpy for sklearn
+    embeddings_np = embeddings.cpu().numpy()
+    labels_np = labels.cpu().numpy()
+    
+    # Get unique class labels
+    unique_labels = np.unique(labels_np)
+    
+    # Calculate similarity matrix (cosine similarity)
+    sim_matrix = np.matmul(embeddings_np, embeddings_np.T)
+    
+    class_specificities = {}
+    
+    # For each class
+    for class_label in unique_labels:
+        # Identify samples of this class
+        class_mask = (labels_np == class_label)
+        class_indices = np.where(class_mask)[0]
+        
+        # Skip if too few samples
+        if len(class_indices) < 2:
+            class_specificities[int(class_label)] = 0.0
+            continue
+            
+        # Calculate specificities for each sample in this class
+        specificities = []
+        
+        for idx in class_indices:
+            # Create binary labels (1 for same class, 0 for different class)
+            # Exclude the current sample itself
+            other_indices = np.arange(len(labels_np))
+            other_indices = other_indices[other_indices != idx]
+            
+            binary_labels = (labels_np[other_indices] == class_label).astype(int)
+            scores = sim_matrix[idx, other_indices]
+            
+            # Skip if no positive or negative samples
+            if np.sum(binary_labels) == 0 or np.sum(binary_labels) == len(binary_labels):
+                continue
+                
+            # Calculate ROC curve
+            fpr, tpr, thresholds = metrics.roc_curve(binary_labels, scores)
+            
+            # Get specificity = 1 - fpr
+            specificity = 1 - fpr
+            
+            # Find threshold closest to target sensitivity without going below it
+            valid_indices = np.where(tpr >= sensitivity_target)[0]
+            if len(valid_indices) > 0:
+                # Get index where sensitivity (tpr) is closest to target
+                closest_idx = valid_indices[np.argmin(np.abs(tpr[valid_indices] - sensitivity_target))]
+                sample_specificity = specificity[closest_idx]
+                specificities.append(sample_specificity)
+        
+        # Calculate mean specificity for this class
+        if specificities:
+            class_specificities[int(class_label)] = float(np.mean(specificities))
+        else:
+            class_specificities[int(class_label)] = 0.0
+    
+    # Calculate overall specificity, unweighted average across classes with valid measurements
+    valid_specificities = [spec for cls, spec in class_specificities.items() if spec > 0]
+    if valid_specificities:
+        overall_specificity = float(np.mean(valid_specificities))
+    else:
+        overall_specificity = 0.0
+    
+    return overall_specificity, class_specificities

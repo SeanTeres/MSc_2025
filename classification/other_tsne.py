@@ -15,7 +15,6 @@ import h5py
 from datasets.dataloader import get_dataloaders, get_dataloaders_with_files
 import torchxrayvision as xrv
 import torch
-from train_utils import classes, helpers
 import torch.nn.functional as F
 import torch.nn as nn
 import wandb
@@ -312,7 +311,7 @@ def visualize_tsne(model, device, ilo_dataset, mbod_loader, trained=False, log_t
         print("Logging t-SNE visualizations to wandb...")
         wandb.log({
             f"{set_name} tsne": wandb.Image(file_name_by_class)
-        }, step=n_epochs)
+        })
         print("Logged visualizations to wandb successfully")
 
 def check_empty_study_ids(hdf5_path):
@@ -579,24 +578,23 @@ def visualize_multiple_tsne_3d_with_ilo2_and_tb(model, device, data_loaders, loa
 
 
 
-def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=None, mbod_loader=None, tb_loader=None,
+def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset, mbod_loader, tb_loader=None,
                 trained=False, log_to_wandb=False, n_epochs=0, set_name="Training", entire_dataset=False, special_filename=None, tb_dataset_name="TB-Net"):
     print("Starting t-SNE visualization generation...")
     model.eval()
 
     mbod_feats, mbod_labels = [], []
-    if mbod_loader is not None:
-        print("Processing MBOD batches...")
-        for batch in mbod_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            mbod_feats.append(feats.cpu().numpy())
-            mbod_labels.append(labels)
-        mbod_feats = np.concatenate(mbod_feats, axis=0)
-        mbod_labels = np.concatenate(mbod_labels, axis=0)
-        print(f"Processed {len(mbod_feats)} MBOD images.")
+    print("Processing MBOD batches...")
+    for batch in mbod_loader:
+        imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
+        with torch.no_grad():
+            feats = model.features(imgs)
+            feats = torch.flatten(feats, start_dim=1)
+        mbod_feats.append(feats.cpu().numpy())
+        mbod_labels.append(labels)
+    mbod_feats = np.concatenate(mbod_feats, axis=0)
+    mbod_labels = np.concatenate(mbod_labels, axis=0)
+    print(f"Processed {len(mbod_feats)} MBOD images.")
 
     ilo_feats, ilo_labels = [], []
     if ilo_dataset is not None:
@@ -618,6 +616,8 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
         ilo_labels = np.array(ilo_labels)
         print(f"Processed {len(ilo_feats)} ILO images.")
 
+
+
     tb_feats, tb_labels = [], []
     if tb_loader is not None:
         print("Processing TB batches...")
@@ -632,31 +632,18 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
         tb_labels = np.concatenate(tb_labels, axis=0)
         print(f"Processed {len(tb_feats)} TB images.")
 
-    # Combine all features and labels based on which datasets are available
-    all_features = []
-    all_sources = []
-    all_label_lists = []
-    
-    if ilo_dataset is not None:
-        all_features.append(ilo_feats)
-        all_sources.extend(['ILO'] * len(ilo_feats))
-        all_label_lists.append(ilo_labels)
-    
-    if mbod_loader is not None:
-        all_features.append(mbod_feats)
-        all_sources.extend(['MBOD'] * len(mbod_feats))
-        all_label_lists.append(mbod_labels)
-    
-    if tb_loader is not None:
-        all_features.append(tb_feats)
-        all_sources.extend(['TB'] * len(tb_feats))
-        all_label_lists.append(tb_labels)
-    
-    all_feats = np.concatenate(all_features, axis=0)
-    all_labels = np.concatenate(all_label_lists, axis=0)
-    sources = all_sources
+    # Combine all features and labels
+    all_feats = np.concatenate([ilo_feats, mbod_feats] + ([tb_feats] if tb_loader else []), axis=0)
 
-    # Separate TB indices
+    # Track sources separately
+    sources = (
+        ['ILO'] * len(ilo_feats) +
+        ['MBOD'] * len(mbod_feats) +
+        (['TB'] * len(tb_feats) if tb_loader else [])
+    )
+
+    # Save labels separately for MBOD/ILO and TB
+    all_labels = np.concatenate([ilo_labels, mbod_labels] + ([tb_labels] if tb_loader else []), axis=0)
     tb_indices = [i for i, s in enumerate(sources) if s == 'TB']
     non_tb_indices = [i for i, s in enumerate(sources) if s != 'TB']
 
@@ -667,12 +654,12 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
 
     os.makedirs('viz', exist_ok=True)
 
-    # Profusion score colormap
+    # Profusion score colormap (e.g. tab10)
     profusion_labels = np.unique([l for i, l in enumerate(all_labels) if sources[i] != 'TB'])
     profusion_cmap = plt.cm.get_cmap('tab10', max(len(profusion_labels), 10))
     profusion_colors = {label: profusion_cmap(i % 10) for i, label in enumerate(profusion_labels)}
 
-    # TB colormap
+    # TB label colormap (use different colormap like Set1)
     tb_cmap = plt.cm.get_cmap('Pastel2', 4)
     tb_colors = {0: tb_cmap(0), 1: tb_cmap(3)}
 
@@ -680,6 +667,7 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
         0: '#9467bd',  # TB negative (purple)
         1: '#e377c2',  # TB positive (pink)
     }
+
 
     tab10_colors = [
         '#1f77b4',  # Profusion 0 (blue)
@@ -690,59 +678,41 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
 
     plt.figure(figsize=(14, 10))
 
-    # Plot ILO & MBOD data
+    # Plot ILO & MBOD
     for label in profusion_labels:
         prof_label = label % 4
-        
-        # Plot MBOD data
-        if mbod_loader is not None:
-            source = 'MBOD'
-            marker = 'o' if label >= 4 else 'x'  # Circle for TB+, X for TB-
-            size = 40
-            alpha = 0.6
-            
+        for source, marker, size, alpha in [('ILO', '*', 120, 0.8), ('MBOD', 'o', 40, 0.6)]:
             idx = [
                 i for i in range(len(all_labels))
                 if all_labels[i] == label and sources[i] == source
             ]
             if idx:
+                
                 coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tab10_colors[prof_label]],
-                    marker=marker,
-                    s=size,
-                    label=f'{source} - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}',
-                    alpha=alpha,
-                    edgecolors='white',
-                    linewidths=0.5
-                )
-        
-        # Plot ILO data if available
-        if ilo_dataset is not None:
-            source = 'ILO'
-            marker = '*'  # Star for ILO
-            size = 120
-            alpha = 0.8
-            
-            idx = [
-                i for i in range(len(all_labels))
-                if all_labels[i] == label and sources[i] == source
-            ]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tab10_colors[prof_label]],
-                    marker=marker,
-                    s=size,
-                    label=f'{source} - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}',
-                    alpha=alpha,
-                    edgecolors='black',
-                    linewidths=0.5
-                )
+                if source == 'MBOD':
+                    plt.scatter(
+                        coords[:, 0], coords[:, 1],
+                        c=[profusion_colors[prof_label]],
+                        marker=marker if label >= 4 else 'x',
+                        s=size,
+                        label=f'{source} - Profusion {int(prof_label)} (TB+)' if label >= 4 else f'{source} - Profusion {int(prof_label)} (TB-)',
+                        alpha=alpha,
+                        edgecolors='black' if source == 'ILO' else 'white',
+                        linewidths=0.5
+                    )
+                elif source == 'ILO':
+                    plt.scatter(
+                        coords[:, 0], coords[:, 1],
+                        c=[profusion_colors[prof_label]],
+                        marker=marker,
+                        s=size,
+                        label=f'{source} - Profusion {int(prof_label)} (TB-)',
+                        alpha=alpha,
+                        edgecolors='black',
+                        linewidths=0.5
+                    )
 
-    # Plot TB data if available
+    # Plot TB
     if tb_loader is not None:
         for tb_label in [0, 1]:
             idx = [i for i in tb_indices if all_labels[i] == tb_label]
@@ -784,6 +754,7 @@ def visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset=No
             f"{set_name} tsne": wandb.Image(file_name)
         })
         print("Logged visualizations to wandb successfully")
+
 
 def visualize_separate_tsne_3d_with_ilo2_and_tb(model, device, data_loaders, loader_names, ilo_dataset, 
                                         experiment_name, output_dir=None):
@@ -1077,7 +1048,7 @@ def visualize_separate_tsne_3d_with_ilo2_and_tb_networks(model, device, data_loa
     
     # Extract features from TB-Net dataset
     print("Extracting features from TB-Net dataset...")
-    tb_net_feats, tb_net_labels, tb_net_filenames = extract_feats(tb_net_loader, has_filename=False)
+    tb_net_feats, tb_net_labels, tb_net_filenames = extract_feats(tb_net_loader, has_filename=True)
     
     # Set output directory
     if output_dir is None:
@@ -1188,10 +1159,13 @@ def visualize_separate_tsne_3d_with_ilo2_and_tb_networks(model, device, data_loa
         for tb_label in np.unique(tb_net_labels):
             tb_indices = np.where(tb_net_labels == tb_label)[0]
             if len(tb_indices) > 0:
+
                 hovertexts_tb = [
-                    f"TB-Net<br>Label: {int(tb_label)}<br>X: {tb_net_tsne[idx, 0]:.2f}<br>Y: {tb_net_tsne[idx, 1]:.2f}<br>Z: {tb_net_tsne[idx, 2]:.2f}"
-                    for idx in tb_indices
-                ]
+                f"Filename: {tb_net_filenames[idx]}<br>TB-Net<br>Label: {int(tb_label)}"
+                f"<br>X: {tb_net_tsne[idx, 0]:.2f}<br>Y: {tb_net_tsne[idx, 1]:.2f}"
+                f"<br>Z: {tb_net_tsne[idx, 2]:.2f}"
+                for idx in tb_indices
+            ]
                 scatter_tb = go.Scatter3d(
                     x=tb_net_tsne[tb_indices, 0],
                     y=tb_net_tsne[tb_indices, 1],
@@ -1585,886 +1559,6 @@ def test_with_tb_datasets(model, device, data_loaders, loader_names, ilo_dataset
     
     return html_paths
 
-
-def create_tsne_plot(model, device, experiment_name, ilo_dataset=None, mbod_loader=None, tb_loader=None,
-                trained=False, log_to_wandb=False, n_epochs=0, set_name="Training", entire_dataset=False, special_filename=None, tb_dataset_name="TB-Net", mbod_label_scheme="profusion_score", use_gridlines=True):
-    print("Starting t-SNE visualization generation...")
-    model.eval()
-
-    mbod_feats, mbod_labels = [], []
-    if mbod_loader is not None:
-        print("Processing MBOD batches...")
-        for batch in mbod_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            mbod_feats.append(feats.cpu().numpy())
-            mbod_labels.append(labels)
-        mbod_feats = np.concatenate(mbod_feats, axis=0)
-        mbod_labels = np.concatenate(mbod_labels, axis=0)
-        print(f"Processed {len(mbod_feats)} MBOD images.")
-
-    ilo_feats, ilo_labels = [], []
-    if ilo_dataset is not None:
-        print(f"\nProcessing {len(ilo_dataset)} ILO images...\n")
-        for idx in range(len(ilo_dataset)):
-            sample = ilo_dataset[idx]
-            img = sample[0].unsqueeze(0).to(device)
-            label = sample[1]
-            label = label.item() if isinstance(label, torch.Tensor) else float(label)
-
-            with torch.no_grad():
-                feats = model.features(img)
-                feats = torch.flatten(feats, start_dim=1)
-
-            ilo_feats.append(feats.cpu().numpy())
-            ilo_labels.append(label)
-
-        ilo_feats = np.concatenate(ilo_feats, axis=0)
-        ilo_labels = np.array(ilo_labels)
-        print(f"Processed {len(ilo_feats)} ILO images.")
-
-    tb_feats, tb_labels = [], []
-    if tb_loader is not None:
-        print("Processing TB batches...")
-        for batch in tb_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            tb_feats.append(feats.cpu().numpy())
-            tb_labels.append(labels)
-        tb_feats = np.concatenate(tb_feats, axis=0)
-        tb_labels = np.concatenate(tb_labels, axis=0)
-        print(f"Processed {len(tb_feats)} TB images.")
-
-    # Combine all features and labels based on which datasets are available
-    all_features = []
-    all_sources = []
-    all_label_lists = []
-    
-    if ilo_dataset is not None:
-        all_features.append(ilo_feats)
-        all_sources.extend(['ILO'] * len(ilo_feats))
-        all_label_lists.append(ilo_labels)
-    
-    if mbod_loader is not None:
-        all_features.append(mbod_feats)
-        all_sources.extend(['MBOD'] * len(mbod_feats))
-        all_label_lists.append(mbod_labels)
-    
-    if tb_loader is not None:
-        all_features.append(tb_feats)
-        all_sources.extend(['TB'] * len(tb_feats))
-        all_label_lists.append(tb_labels)
-    
-    all_feats = np.concatenate(all_features, axis=0)
-    all_labels = np.concatenate(all_label_lists, axis=0)
-    sources = all_sources
-
-    # Separate TB indices
-    tb_indices = [i for i, s in enumerate(sources) if s == 'TB']
-    non_tb_indices = [i for i, s in enumerate(sources) if s != 'TB']
-
-    # t-SNE
-    print("Fitting t-SNE...")
-    tsne = TSNE(n_components=2, random_state=42, n_iter=1000, verbose=0)
-    all_feats_2d = tsne.fit_transform(all_feats)
-
-    os.makedirs('viz', exist_ok=True)
-
-    # Profusion score colormap
-    profusion_labels = np.unique([l for i, l in enumerate(all_labels) if sources[i] != 'TB'])
-    profusion_cmap = plt.cm.get_cmap('tab10', max(len(profusion_labels), 10))
-    profusion_colors = {label: profusion_cmap(i % 10) for i, label in enumerate(profusion_labels)}
-
-    # TB colormap
-    tb_cmap = plt.cm.get_cmap('Pastel2', 4)
-    tb_colors = {0: tb_cmap(0), 1: tb_cmap(3)}
-
-    tb_net_colors = {
-        0: '#9467bd',  # TB negative (purple)
-        1: '#e377c2',  # TB positive (pink)
-    }
-
-    mbod_bin_colors = {
-        0: '#1f77b4',  # Profusion 0 (blue)
-        1: "#2ca02c"
-    }
-
-    tab10_colors = [
-        '#1f77b4',  # Profusion 0 (blue)
-        '#ff7f0e',  # Profusion 1 (orange)
-        '#2ca02c',  # Profusion 2 (green)
-        '#d62728',  # Profusion 3 (red)
-    ]
-
-    plt.figure(figsize=(14, 10))
-
-# Plot ILO & MBOD data
-    for label in profusion_labels:
-        # Handle different labeling schemes
-        if mbod_label_scheme == "profusion_score":
-            # Use original profusion score (0-3)
-            prof_label = label % 4
-            marker = 'o'  # Use consistent marker
-            label_text = f'MBOD - Profusion {int(prof_label)}'
-        elif mbod_label_scheme == "binary_silicosis":
-            # Binary: 0=no silicosis (prof 0), 1=has silicosis (prof 1-3)
-            prof_label = 1 if (label % 4) > 0 else 0
-            marker = 'o'  # Use consistent marker
-            label_text = f'MBOD - {"(Silicosis+)" if prof_label == 1 else "(Silicosis-)"}'
-        elif mbod_label_scheme == "binary_tb":
-            # Binary: 0=no TB (0-3), 1=has TB (4-7)
-            prof_label = 1 if label >= 4 else 0
-            marker = 'o' if prof_label == 1 else 'x'  # Circle for TB+, X for TB-
-            label_text = f'MBOD - {"(TB+)" if prof_label == 1 else "(TB-)"}'
-        else:
-            # Default: original multiclass_stb labeling
-            prof_label = label % 4
-            marker = 'o' if label >= 4 else 'x'  # Circle for TB+, X for TB-
-            label_text = f'MBOD - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}'
-        
-        # Get appropriate color based on the labeling scheme
-        if mbod_label_scheme in ["binary_silicosis", "binary_tb"]:
-            color = mbod_bin_colors[prof_label]  # Use binary colors
-        else:
-            color = tab10_colors[prof_label]  # Use profusion score colors
-        
-        # Plot MBOD data
-        if mbod_loader is not None:
-            source = 'MBOD'
-            size = 40
-            alpha = 0.6
-            
-            idx = [
-                i for i in range(len(all_labels))
-                if all_labels[i] == label and sources[i] == source
-            ]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[color],
-                    marker=marker,
-                    s=size,
-                    label=label_text,
-                    alpha=alpha,
-                    edgecolors='white',
-                    linewidths=0.5
-                )
-        # Plot ILO data if available
-        if ilo_dataset is not None:
-            source = 'ILO'
-            marker = '*'  # Star for ILO
-            size = 120
-            alpha = 0.8
-            
-            idx = [
-                i for i in range(len(all_labels))
-                if all_labels[i] == label and sources[i] == source
-            ]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tab10_colors[prof_label]],
-                    marker=marker,
-                    s=size,
-                    label=f'{source} - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}',
-                    alpha=alpha,
-                    edgecolors='black',
-                    linewidths=0.5
-                )
-
-    # Plot TB data if available
-    if tb_loader is not None:
-        for tb_label in [0, 1]:
-            idx = [i for i in tb_indices if all_labels[i] == tb_label]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tb_net_colors[tb_label]],
-                    marker='x' if tb_label == 0 else 'o',  # X for TB negative, O for TB positive
-                    s=40,
-                    label=f'{tb_dataset_name} (TB-)' if tb_label == 0 else f'{tb_dataset_name} (TB+)',
-                    alpha=1.0,
-                    edgecolors='white',
-                    linewidths=0.7
-                )
-
-    title_to_add = "Entire Dataset" if entire_dataset else ""
-    plt.title(f"t-SNE Visualization", fontsize=16)
-    plt.xlabel("t-SNE Component 1", fontsize=14)
-    plt.ylabel("t-SNE Component 2", fontsize=14)
-    plt.grid(use_gridlines, alpha=0.3)
-
-    handles, labels_legend = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels_legend, handles))
-    plt.legend(by_label.values(), by_label.keys(), loc='best', fontsize=10)
-
-    file_name = f"visualizations/tsne_all_sources{'_trained' if trained else '_untrained'}.png"
-    plt.tight_layout()
-
-    if special_filename is not None:
-        file_name = f"viz/tsne_all_sources_{special_filename}{'_trained' if trained else '_untrained'}.png"
-    plt.savefig(file_name, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved t-SNE visualizations to {file_name}")
-
-    if log_to_wandb:
-        print("Logging t-SNE visualizations to wandb...")
-        wandb.log({
-            f"{set_name} tsne": wandb.Image(file_name)
-        })
-        print("Logged visualizations to wandb successfully")
-
-def create_tsne_plot_2(model, device, experiment_name, ilo_dataset=None, mbod_loader=None, tb_loader=None, rand_loader=None,
-                trained=False, log_to_wandb=False, n_epochs=0, set_name="Training", entire_dataset=False, 
-                special_filename=None, tb_dataset_name="TB-Net", mbod_label_scheme="profusion_score", 
-                rand_label_scheme="binary_silicosis", use_gridlines=True):
-    """
-    Generate t-SNE visualization for comparing embeddings from multiple datasets.
-    
-    Args:
-        model: Model to extract features
-        device: CPU or GPU device
-        experiment_name: Name of the experiment
-        ilo_dataset: ILO reference dataset (optional)
-        mbod_loader: MBOD dataset loader (optional)
-        tb_loader: TB-Net dataset loader (optional)
-        rand_loader: Additional random dataset loader (optional)
-        trained: Whether model is trained or untrained
-        log_to_wandb: Whether to log results to W&B
-        n_epochs: Number of training epochs
-        set_name: Name of dataset for logging
-        entire_dataset: Flag for entire dataset visualization
-        special_filename: Custom filename for saving
-        tb_dataset_name: Name to display for TB dataset
-        mbod_label_scheme: Labeling scheme for MBOD ("profusion_score", "binary_silicosis", "binary_tb", etc.)
-        rand_label_scheme: Labeling scheme for rand dataset ("binary_silicosis" or "binary_tb")
-        use_gridlines: Whether to display grid in visualization
-    """
-    print("Starting t-SNE visualization generation...")
-    model.eval()
-
-    # Process MBOD dataset
-    mbod_feats, mbod_labels = [], []
-    if mbod_loader is not None:
-        print("Processing MBOD batches...")
-        for batch in mbod_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            mbod_feats.append(feats.cpu().numpy())
-            mbod_labels.append(labels)
-        mbod_feats = np.concatenate(mbod_feats, axis=0)
-        mbod_labels = np.concatenate(mbod_labels, axis=0)
-        print(f"Processed {len(mbod_feats)} MBOD images.")
-
-    # Process ILO dataset
-    ilo_feats, ilo_labels = [], []
-    if ilo_dataset is not None:
-        print(f"\nProcessing {len(ilo_dataset)} ILO images...\n")
-        for idx in range(len(ilo_dataset)):
-            sample = ilo_dataset[idx]
-            img = sample[0].unsqueeze(0).to(device)
-            label = sample[1]
-            label = label.item() if isinstance(label, torch.Tensor) else float(label)
-
-            with torch.no_grad():
-                feats = model.features(img)
-                feats = torch.flatten(feats, start_dim=1)
-
-            ilo_feats.append(feats.cpu().numpy())
-            ilo_labels.append(label)
-
-        ilo_feats = np.concatenate(ilo_feats, axis=0)
-        ilo_labels = np.array(ilo_labels)
-        print(f"Processed {len(ilo_feats)} ILO images.")
-
-    # Process TB-Net dataset
-    tb_feats, tb_labels = [], []
-    if tb_loader is not None:
-        print("Processing TB batches...")
-        for batch in tb_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            tb_feats.append(feats.cpu().numpy())
-            tb_labels.append(labels)
-        tb_feats = np.concatenate(tb_feats, axis=0)
-        tb_labels = np.concatenate(tb_labels, axis=0)
-        print(f"Processed {len(tb_feats)} TB images.")
-    
-    # Process Rand dataset
-    rand_feats, rand_labels = [], []
-    if rand_loader is not None:
-        print("Processing Rand batches...")
-        for batch in rand_loader:
-            imgs, labels = batch[0].to(device), batch[1].cpu().numpy()
-            with torch.no_grad():
-                feats = model.features(imgs)
-                feats = torch.flatten(feats, start_dim=1)
-            rand_feats.append(feats.cpu().numpy())
-            rand_labels.append(labels)
-        rand_feats = np.concatenate(rand_feats, axis=0)
-        rand_labels = np.concatenate(rand_labels, axis=0)
-        print(f"Processed {len(rand_feats)} Rand images.")
-
-    # Combine all features and labels based on which datasets are available
-    all_features = []
-    all_sources = []
-    all_label_lists = []
-    
-    if ilo_dataset is not None:
-        all_features.append(ilo_feats)
-        all_sources.extend(['ILO'] * len(ilo_feats))
-        all_label_lists.append(ilo_labels)
-    
-    if mbod_loader is not None:
-        all_features.append(mbod_feats)
-        all_sources.extend(['MBOD'] * len(mbod_feats))
-        all_label_lists.append(mbod_labels)
-    
-    if tb_loader is not None:
-        all_features.append(tb_feats)
-        all_sources.extend(['TB'] * len(tb_feats))
-        all_label_lists.append(tb_labels)
-        
-    if rand_loader is not None:
-        all_features.append(rand_feats)
-        all_sources.extend(['RAND'] * len(rand_feats))
-        all_label_lists.append(rand_labels)
-    
-    all_feats = np.concatenate(all_features, axis=0)
-    all_labels = np.concatenate(all_label_lists, axis=0)
-    sources = all_sources
-
-    # Separate dataset indices
-    tb_indices = [i for i, s in enumerate(sources) if s == 'TB']
-    rand_indices = [i for i, s in enumerate(sources) if s == 'RAND']
-    non_tb_indices = [i for i, s in enumerate(sources) if s not in ['TB', 'RAND']]
-
-    # t-SNE
-    print("Fitting t-SNE...")
-    tsne = TSNE(n_components=2, random_state=42, n_iter=1000, verbose=0)
-    all_feats_2d = tsne.fit_transform(all_feats)
-
-    os.makedirs('viz', exist_ok=True)
-
-    # Color schemes
-    tb_net_colors = {
-        0: '#9467bd',  # TB negative (purple)
-        1: '#e377c2',  # TB positive (pink)
-    }
-
-    rand_colors = {
-        0: '#17becf',  # Binary negative (cyan)
-        1: '#bcbd22',  # Binary positive (olive)
-    }
-
-    mbod_bin_colors = {
-        0: '#1f77b4',  # Profusion 0 (blue)
-        1: "#2ca02c"   # Profusion 1-3 (green)
-    }
-
-    tab10_colors = [
-        '#1f77b4',  # Profusion 0 (blue)
-        '#ff7f0e',  # Profusion 1 (orange)
-        '#2ca02c',  # Profusion 2 (green)
-        '#d62728',  # Profusion 3 (red)
-    ]
-
-    plt.figure(figsize=(14, 10))
-
-    # Get unique profusion labels excluding TB-Net and Rand datasets
-    profusion_labels = np.unique([l for i, l in enumerate(all_labels) if sources[i] not in ['TB', 'RAND']])
-
-    # Plot ILO & MBOD data
-    for label in profusion_labels:
-        # Handle different labeling schemes for MBOD
-        if mbod_label_scheme == "profusion_score":
-            prof_label = label % 4
-            marker = 'o'
-            label_text = f'MBOD - Profusion {int(prof_label)}'
-        elif mbod_label_scheme == "binary_silicosis":
-            prof_label = 1 if (label % 4) > 0 else 0
-            marker = 'o'
-            label_text = f'MBOD - {"(Silicosis+)" if prof_label == 1 else "(Silicosis-)"}'
-        elif mbod_label_scheme == "binary_tb":
-            prof_label = 1 if label >= 4 else 0
-            marker = 'o' if prof_label == 1 else 'x'
-            label_text = f'MBOD - {"(TB+)" if prof_label == 1 else "(TB-)"}'
-        else:
-            # Default: original multiclass_stb labeling
-            prof_label = label % 4
-            marker = 'o' if label >= 4 else 'x'
-            label_text = f'MBOD - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}'
-        
-        # Get appropriate color based on the labeling scheme
-        if mbod_label_scheme in ["binary_silicosis", "binary_tb"]:
-            color = mbod_bin_colors[prof_label]
-        else:
-            color = tab10_colors[prof_label]
-        
-        # Plot MBOD data
-        if mbod_loader is not None:
-            source = 'MBOD'
-            size = 40
-            alpha = 0.6
-            
-            idx = [i for i in range(len(all_labels)) if all_labels[i] == label and sources[i] == source]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[color],
-                    marker=marker,
-                    s=size,
-                    label=label_text,
-                    alpha=alpha,
-                    edgecolors='white',
-                    linewidths=0.5
-                )
-                
-        # Plot ILO data
-        if ilo_dataset is not None:
-            source = 'ILO'
-            marker = '*'  # Star for ILO
-            size = 120
-            alpha = 0.8
-            
-            idx = [i for i in range(len(all_labels)) if all_labels[i] == label and sources[i] == source]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tab10_colors[prof_label]],
-                    marker=marker,
-                    s=size,
-                    label=f'{source} - Profusion {int(prof_label)} {"(TB+)" if label >= 4 else "(TB-)"}',
-                    alpha=alpha,
-                    edgecolors='black',
-                    linewidths=0.5
-                )
-
-    # Plot TB-Net data
-    if tb_loader is not None:
-        for tb_label in [0, 1]:
-            idx = [i for i in tb_indices if all_labels[i] == tb_label]
-            if idx:
-                coords = all_feats_2d[idx]
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[tb_net_colors[tb_label]],
-                    marker='x' if tb_label == 0 else 'o',  # X for TB-, O for TB+
-                    s=40,
-                    label=f'{tb_dataset_name} (TB-)' if tb_label == 0 else f'{tb_dataset_name} (TB+)',
-                    alpha=1.0,
-                    edgecolors='white',
-                    linewidths=0.7
-                )
-
-    # Plot Rand data
-    if rand_loader is not None:
-        for rand_label in np.unique([all_labels[i] for i in rand_indices]):
-            rand_int_label = int(rand_label)
-            idx = [i for i in rand_indices if all_labels[i] == rand_label]
-            
-            if idx:
-                coords = all_feats_2d[idx]
-                
-                # Handle different labeling schemes for Rand dataset
-                if rand_label_scheme == "binary_silicosis":
-                    label_text = f'RAND (Silicosis{"+" if rand_int_label == 1 else "-"})'
-                    marker = 'p'  # pentagon marker to distinguish from others
-                elif rand_label_scheme == "binary_tb":
-                    label_text = f'RAND (TB{"+" if rand_int_label == 1 else "-"})'
-                    marker = 'd' if rand_int_label == 0 else '>'  # diamond for TB-, triangle for TB+
-                else:
-                    label_text = f'RAND - Label {rand_int_label}'
-                    marker = 'h'  # hexagon as default marker
-                
-                plt.scatter(
-                    coords[:, 0], coords[:, 1],
-                    c=[rand_colors[rand_int_label]],
-                    marker=marker,
-                    s=50,
-                    label=label_text,
-                    alpha=0.8,
-                    edgecolors='black',
-                    linewidths=0.5
-                )
-
-    # Formatting and display
-    title_to_add = "Entire Dataset" if entire_dataset else ""
-    plt.title(f"t-SNE Visualization", fontsize=16)
-    plt.xlabel("t-SNE Component 1", fontsize=14)
-    plt.ylabel("t-SNE Component 2", fontsize=14)
-    plt.grid(use_gridlines, alpha=0.3)
-
-    # Create legend with unique entries
-    handles, labels_legend = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels_legend, handles))
-    plt.legend(by_label.values(), by_label.keys(), loc='best', fontsize=10)
-
-    # Save figure
-    file_name = f"visualizations/tsne_all_sources{'_trained' if trained else '_untrained'}.png"
-    plt.tight_layout()
-
-    if special_filename is not None:
-        file_name = f"viz/tsne_all_sources_{special_filename}{'_trained' if trained else '_untrained'}.png"
-    
-    plt.savefig(file_name, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved t-SNE visualizations to {file_name}")
-
-    if log_to_wandb:
-        print("Logging t-SNE visualizations to wandb...")
-        wandb.log({
-            f"{set_name} tsne": wandb.Image(file_name)
-        })
-        print("Logged visualizations to wandb successfully")
-        
-    return file_name
-
-def test_with_tb_datasets_umap(model, device, data_loaders, loader_names, ilo_dataset, 
-                                tb_net_loaders, tb_net_names, tb_net_colors=None, 
-                                experiment_name="experiment", output_dir=None, n_neighbors=15, min_dist=0.1):
-    """
-    Generate multiple individual 3D interactive UMAP plot HTML files for different data loaders,
-    including ILO reference images and multiple TB dataset sources with distinct markers.
-    
-    Args:
-        model: The model to extract features with
-        device: Device to run computations on (cpu/cuda)
-        data_loaders: Dictionary of data loaders or datasets to visualize
-        loader_names: List of display names for each data loader
-        ilo_dataset: Dataset of ILO reference images
-        tb_net_loaders: List of DataLoaders for TB datasets 
-        tb_net_names: List of names for TB datasets
-        tb_net_colors: Dictionary of color schemes for each TB dataset (optional)
-        experiment_name: Name of the experiment for the title
-        output_dir: Directory to save the HTML files
-        n_neighbors: UMAP hyperparameter controlling the balance between local and global structure
-        min_dist: UMAP hyperparameter controlling how tightly points are packed together
-    """
-    import pandas as pd
-    import plotly.graph_objects as go
-    import os
-    import numpy as np
-    import torch
-    # Import UMAP instead of t-SNE
-    import umap
-    
-    # Tab10 color scheme for 4 profusion scores
-    tab10_colors = [
-        '#1f77b4',  # Profusion 0 (blue)
-        '#ff7f0e',  # Profusion 1 (orange)
-        '#2ca02c',  # Profusion 2 (green)
-        '#d62728',  # Profusion 3 (red)
-    ]
-    
-    # Default TB colors if not provided
-    if tb_net_colors is None:
-        # Default color schemes for different TB datasets
-        default_tb_schemes = [
-            {0: '#9467bd', 1: '#e377c2'},  # Purple/Pink (default TB-Net)
-            {0: '#8c564b', 1: '#c49c94'},  # Brown
-            {0: '#7f7f7f', 1: '#c7c7c7'},  # Gray
-            {0: '#17becf', 1: '#9edae5'},  # Cyan
-            {0: '#bcbd22', 1: '#dbdb8d'}    # Olive
-        ]
-        
-        tb_net_colors = {}
-        for i, tb_name in enumerate(tb_net_names):
-            tb_net_colors[tb_name] = default_tb_schemes[i % len(default_tb_schemes)]
-    
-    # Map multiclass_stb to profusion scores (0–3)
-    def get_profusion_score(label):
-        return label % 4  # Map 0–3 to 0–3, and 4–7 to 0–3
-
-    model.to(device)
-    model.eval()
-    
-    # Function to extract features from a dataset or dataloader
-    def extract_feats(dataset_or_loader, is_loader=True, has_filename=True):
-        feats, labels, filenames = [], [], []
-        with torch.no_grad():
-            if is_loader:
-                for batch in dataset_or_loader:
-                    # Handle case where dataset doesn't return filenames
-                    if has_filename and len(batch) >= 3:
-                        x, y, filename = batch
-                        filenames.extend(filename)  # Assuming filename is a list or batch
-                    else:
-                        # For TB loaders that might only return images and labels
-                        if len(batch) >= 2:
-                            x, y = batch[:2]
-                        else:
-                            x = batch
-                            y = torch.zeros(x.size(0))  # Default labels if none provided
-                            
-                        # Create placeholder filenames when not available
-                        filenames.extend([f"unknown_file_{i}" for i in range(len(y))])
-                        
-                    x = x.to(device)
-                    f = model.features(x)
-                    f = torch.flatten(f, start_dim=1).cpu().numpy()
-                    feats.append(f)
-                    labels.append(y.numpy() if isinstance(y, torch.Tensor) else y)
-            else:
-                for i in range(len(dataset_or_loader)):
-                    if has_filename:
-                        x, y, filename = dataset_or_loader[i]
-                        filenames.append(filename)  # Assuming filename is a single string
-                    else:
-                        x, y = dataset_or_loader[i]
-                        filenames.append(f"unknown_file_{i}")
-                        
-                    x = x.unsqueeze(0).to(device)
-                    f = model.features(x)
-                    f = torch.flatten(f, start_dim=1).cpu().numpy()
-                    feats.append(f)
-                    labels.append([y])
-                    
-        return np.concatenate(feats), np.concatenate(labels), filenames
-    
-    print("Extracting features from ILO reference dataset...")
-    ilo_feats, ilo_labels, ilo_filenames = extract_feats(ilo_dataset, is_loader=False)
-    
-    # Extract features from all TB datasets
-    tb_dataset_features = []
-    for i, tb_loader in enumerate(tb_net_loaders):
-        tb_name = tb_net_names[i]
-
-        if len(tb_loader) > 2:
-            flag=True
-        else:
-            flag=False
-        
-        print(f"Extracting features from {tb_name} dataset...")
-        tb_feats, tb_labels, tb_filenames = extract_feats(tb_loader, has_filename=flag)
-        tb_dataset_features.append({
-            "name": tb_name,
-            "feats": tb_feats,
-            "labels": tb_labels,
-            "filenames": tb_filenames
-        })
-    
-    # Set output directory
-    if output_dir is None:
-        output_dir = os.path.join("umap_html_new", experiment_name)
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    html_paths = []
-    
-    for i, (loader_key, loader_name) in enumerate(zip(data_loaders.keys(), loader_names)):
-        loader_or_dataset = data_loaders[loader_key]
-        is_loader = not hasattr(loader_or_dataset, '__getitem__')
-        
-        print(f"Extracting features for {loader_name}...")
-        mbod_feats, mbod_labels, mbod_filenames = extract_feats(loader_or_dataset, is_loader=is_loader)
-        
-        # Combine all features for UMAP fitting
-        all_features_for_umap = [ilo_feats, mbod_feats]
-        for tb_data in tb_dataset_features:
-            all_features_for_umap.append(tb_data["feats"])
-            
-        all_feats = np.concatenate(all_features_for_umap, axis=0)
-        
-        print(f"Running UMAP for {loader_name}...")
-        # Replace t-SNE with UMAP
-        reducer = umap.UMAP(
-            n_components=3,
-            n_neighbors=n_neighbors,
-            min_dist=min_dist,
-            random_state=42
-        )
-        umap_feats = reducer.fit_transform(all_feats)
-        
-        # Split the UMAP results by dataset
-        ilo_count = len(ilo_feats)
-        mbod_count = len(mbod_feats)
-        
-        ilo_umap = umap_feats[:ilo_count]
-        mbod_umap = umap_feats[ilo_count:ilo_count+mbod_count]
-        
-        # Keep track of where each TB dataset starts in the UMAP results
-        tb_start_idx = ilo_count + mbod_count
-        tb_umap_results = []
-        
-        for tb_data in tb_dataset_features:
-            tb_end_idx = tb_start_idx + len(tb_data["feats"])
-            tb_umap = umap_feats[tb_start_idx:tb_end_idx]
-            tb_umap_results.append({
-                "name": tb_data["name"],
-                "umap": tb_umap,
-                "labels": tb_data["labels"],
-                "filenames": tb_data["filenames"]
-            })
-            tb_start_idx = tb_end_idx
-        
-        # Create a new figure for each dataset
-        fig = go.Figure()
-        
-        # Plot the ILO and MBOD data points
-        unique_labels = sorted(np.unique(np.concatenate([ilo_labels, mbod_labels])))
-        
-        for j, label in enumerate(unique_labels):
-            # Map the label to its corresponding profusion score
-            profusion_score = get_profusion_score(label)
-            color = tab10_colors[profusion_score]
-            
-            # Determine the shape based on TB status
-            is_tb_positive = label >= 4
-            shape = 'circle' if is_tb_positive else 'x'  # Circle for TB+, cross for TB-
-            
-            # Plot MBOD samples
-            mbod_indices = np.where(mbod_labels == label)[0]
-            if len(mbod_indices) > 0:
-                hovertexts_mbod = [
-                    f"Filename: {mbod_filenames[idx]}<br>X: {mbod_umap[idx, 0]:.2f}<br>Y: {mbod_umap[idx, 1]:.2f}<br>Z: {mbod_umap[idx, 2]:.2f}"
-                    for idx in mbod_indices
-                ]
-                scatter_mbod = go.Scatter3d(
-                    x=mbod_umap[mbod_indices, 0],
-                    y=mbod_umap[mbod_indices, 1],
-                    z=mbod_umap[mbod_indices, 2],
-                    mode='markers',
-                    marker=dict(
-                        size=4 if is_tb_positive else 2,
-                        color=color,
-                        opacity=0.7,
-                        symbol=shape,  # Use different shapes for TB-positive
-                        line=dict(width=0.5, color='DarkSlateGrey'),
-                    ),
-                    text=hovertexts_mbod,
-                    hoverinfo='text',
-                    name=f'MBOD Profusion {profusion_score} {"(TB+)" if is_tb_positive else "(TB-)"}',
-                    legendgroup=f'Profusion {profusion_score}',
-                    showlegend=(i >= 0)
-                )
-                fig.add_trace(scatter_mbod)
-
-            # Plot ILO samples
-            ilo_indices = np.where(ilo_labels == label)[0]
-            if len(ilo_indices) > 0:
-                hovertexts_ilo = [
-                    f"Filename: {ilo_filenames[idx]}<br>X: {ilo_umap[idx, 0]:.2f}<br>Y: {ilo_umap[idx, 1]:.2f}<br>Z: {ilo_umap[idx, 2]:.2f}"
-                    for idx in ilo_indices
-                ]
-                scatter_ilo = go.Scatter3d(
-                    x=ilo_umap[ilo_indices, 0],
-                    y=ilo_umap[ilo_indices, 1],
-                    z=ilo_umap[ilo_indices, 2],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=color,
-                        opacity=1.0,
-                        symbol='diamond',  # Use diamond shape for ILO
-                        line=dict(width=1.0, color='black'),
-                    ),
-                    text=hovertexts_ilo,
-                    hoverinfo='text',
-                    name=f'ILO Profusion {profusion_score} {"(TB+)" if is_tb_positive else "(TB-)"}',
-                    legendgroup=f'Profusion {profusion_score}',
-                    showlegend=(i >= 0)
-                )
-                fig.add_trace(scatter_ilo)
-        
-        # Plot each TB dataset with its unique color scheme
-        for tb_data, tb_umap_data in zip(tb_dataset_features, tb_umap_results):
-            tb_name = tb_data["name"]
-            tb_umap = tb_umap_data["umap"]
-            tb_labels = tb_umap_data["labels"]
-            tb_filenames = tb_umap_data["filenames"]
-            
-            # Get the color scheme for this TB dataset
-            color_scheme = tb_net_colors[tb_name]
-            
-            # Plot TB samples (binary classification: 0=negative, 1=positive)
-            for tb_label in np.unique(tb_labels):
-                tb_indices = np.where(tb_labels == tb_label)[0]
-                if len(tb_indices) > 0:
-                    hovertexts_tb = [
-                        f"{tb_name}<br>Label: {int(tb_label)}<br>Filename: {tb_filenames[idx]}<br>X: {tb_umap[idx, 0]:.2f}<br>Y: {tb_umap[idx, 1]:.2f}<br>Z: {tb_umap[idx, 2]:.2f}"
-                        for idx in tb_indices
-                    ]
-                    scatter_tb = go.Scatter3d(
-                        x=tb_umap[tb_indices, 0],
-                        y=tb_umap[tb_indices, 1],
-                        z=tb_umap[tb_indices, 2],
-                        mode='markers',
-                        marker=dict(
-                            size=(3 if int(tb_label) == 0 else 5),  # Smaller for TB-, larger for TB+
-                            color=color_scheme[int(tb_label)],
-                            opacity=0.6,
-                            symbol=('circle' if int(tb_label) == 1 else 'x'),  # Use circle for TB+ and x for TB-
-                            line=dict(width=0.8, color='black'),
-                        ),
-                        text=hovertexts_tb,
-                        hoverinfo='text',
-                        name=f'{tb_name} (TB{"+" if int(tb_label) == 1 else "-"})',
-                        legendgroup=f'{tb_name}',  # Group by TB dataset name
-                        showlegend=(i >= 0)
-                    )
-                    fig.add_trace(scatter_tb)
-        
-        fig.update_layout(
-            scene=dict(
-                xaxis_title='UMAP Component 1',
-                yaxis_title='UMAP Component 2',
-                zaxis_title='UMAP Component 3',
-                aspectmode='cube',
-                xaxis=dict(showgrid=True, gridcolor='lightgrey'),
-                yaxis=dict(showgrid=True, gridcolor='lightgrey'),
-                zaxis=dict(showgrid=True, gridcolor='lightgrey'),
-                camera=dict(eye=dict(x=1.5, y=1.5, z=1.0))
-            ),
-            height=1000,
-            width=1200,
-            title_text=f"{experiment_name} - {loader_name} (UMAP)",
-            margin=dict(l=0, r=100, b=0, t=160),
-            template="plotly_white",
-            legend=dict(
-                groupclick="toggleitem",
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,  # Position slightly higher to accommodate multiple TB datasets
-                xanchor="center",
-                x=0.5,
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="lightgrey",
-                borderwidth=1,
-                itemsizing='constant'  # Makes legend markers a consistent size
-            )
-        )
-        
-        # Create a clean filename based on the loader name
-        clean_loader_name = loader_name.lower().replace(" ", "_").replace("/", "_")
-        html_filename = f"{experiment_name}_{clean_loader_name}_umap3d_multi_tb.html"
-        html_path = os.path.join(output_dir, html_filename)
-        
-        fig.write_html(html_path, include_plotlyjs='cdn',
-                       config={
-                           'displayModeBar': True,
-                           'scrollZoom': True,
-                           'displaylogo': False,
-                           'modeBarButtonsToRemove': ['select2d', 'lasso2d']
-                       })
-        
-        html_paths.append(html_path)
-        print(f"Saved UMAP visualization with multiple TB datasets for {loader_name} to {html_path}")
-    
-    return html_paths
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
@@ -2490,40 +1584,10 @@ if __name__ == "__main__":
         transforms.ToTensor(),
         # transforms.Normalize(mean=[0.5], std=[0.5])
         ])
-        def normalize_to_hu_range(img_tensor):
-            """Normalize image tensor to Hounsfield Unit range (-1024, 1024)"""
-            min_val = img_tensor.min()
-            max_val = img_tensor.max()
-            
-            # Scale to [0,1]
-            normalized = (img_tensor - min_val) / (max_val - min_val)
-            
-            # Scale to [-1024, 1024]
-            return normalized * 2048 - 1024
-        
-        preprocess = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Lambda(normalize_to_hu_range)  # Scale [0,1] to [-1024,1024]
-        ])
         # Create an HDF5SilicosisDataset instance
         mbod_dataset_merged = HDF5Dataset2(
             hdf5_path=hdf5_file_path,
             labels_key="multiclass_stb",  # Main pathology labels, 'lab' for all labels
-            images_key="images",
-            augmentations=None,
-            preprocess=preprocess
-        )
-        rand_dataset_v1 = HDF5Dataset(
-            hdf5_path = config["rand_output"]["hdf5_file"],
-            labels_key="tuberculosis",
-            images_key="images",
-            augmentations=None,
-            preprocess=preprocess,
-        )
-
-        mbod_857 = HDF5Dataset2(
-            hdf5_path = config["mbod_857_silicosis_output"]["hdf5_file"],
-            labels_key="profusion_score",
             images_key="images",
             augmentations=None,
             preprocess=preprocess
@@ -2585,7 +1649,7 @@ if __name__ == "__main__":
             7: "Profusion 3, With TB",
         }
         
-        experiment_names = ["Quad_OG-n2_v1XRV_clf_025-m_03-b16"]
+        experiment_names = ["clf_025-BSHN-p_ilo_50-OS_aug-sin_m_01_05"]
             
         for experiment_name in experiment_names:  
             checkpoint_path = f"/home/sean/MSc_2025/codev2/checkpoints/{experiment_name}/best_model.pth"
@@ -2665,18 +1729,6 @@ if __name__ == "__main__":
                 shuffle=False
             )
 
-            rand_merged_loader = torch.utils.data.DataLoader(
-                rand_dataset_v1,
-                batch_size=12,
-                shuffle=False
-            )
-
-            mbod_857_loader = torch.utils.data.DataLoader(
-                mbod_857,
-                batch_size=12,
-                shuffle=False
-            )
-
             tb_loader = torch.utils.data.DataLoader(
                 kaggle_tb_dataset,
                 batch_size=12,
@@ -2699,7 +1751,7 @@ if __name__ == "__main__":
 
             tb_loaders = {
                 "kaggle_tb": tb_loader,
-                "rand": rand_merged_loader,
+                "belarus": belarus_loader,
                 "mc_sz": mc_sz_loader,
             }
             
@@ -2717,13 +1769,13 @@ if __name__ == "__main__":
             print(belarus_dataset[0])
 
             # Create your TB loaders
-            tb_loaders = [tb_loader, rand_merged_loader, mc_sz_loader]
-            tb_names = ["Kaggle TB", "Rand TB", "MC-SZ TB"]
+            tb_loaders = [tb_loader, belarus_loader, mc_sz_loader]
+            tb_names = ["Kaggle TB", "Belarus TB", "MC-SZ TB"]
 
             # Optional: Define custom color schemes
             custom_colors = {
                 "Kaggle TB": {0: '#9467bd', 1: '#e377c2'},  # Purple/Pink scheme
-                "Rand TB": {0: '#8c564b', 1: '#c49c94'},   # Brown scheme
+                "Belarus TB": {0: '#8c564b', 1: '#c49c94'},   # Brown scheme
                 "MC-SZ TB":  {0: '#bcbd22', 1: '#dbdb8d'}   # Olive scheme
                 
             }
@@ -2732,7 +1784,7 @@ if __name__ == "__main__":
 
             # Call the visualization function
             html_paths = test_with_tb_datasets(
-                model=raw_model, 
+                model=model, 
                 device=device, 
                 data_loaders=data_loaders,
                 loader_names=loader_names,
@@ -2741,28 +1793,35 @@ if __name__ == "__main__":
                 tb_net_names=tb_names,
                 tb_net_colors=custom_colors,  # Optional
                 experiment_name=experiment_name,
-                output_dir=f"tsne_html_new/test/RAW/individual_{model_type}_multi_tb"
+                output_dir=f"tsne_html_new/test/{experiment_name}/individual_{model_type}_multi_tb"
             )
-
-            # umap_html_paths = test_with_tb_datasets_umap(
-            #     model=model,
-            #     device=device,
+            # # Call the function to create individual HTML files
+            # html_paths = visualize_separate_tsne_3d_with_ilo2_and_tb(
+            #     model=model, 
+            #     device=device, 
             #     data_loaders=data_loaders,
             #     loader_names=loader_names,
             #     ilo_dataset=ilo_dataset,
-            #     tb_net_loaders=tb_loaders,
-            #     tb_net_names=tb_names,
-            #     tb_net_colors=custom_colors,  # Optional
             #     experiment_name=experiment_name,
-            #     output_dir=f"tsne_html_new/test/{experiment_name}/individual_{model_type}_multi_tb"
+            #     output_dir=f"tsne_html_new/{experiment_name}/individual_{model_type}"  # Custom output directory
             # )
-
 
             # # Print the paths to all generated HTML files
             # print(f"Generated {len(html_paths)} individual t-SNE visualizations:")
             # for path in html_paths:
             #     print(f"  - {path}")
 
+            # # # Call the function to create individual HTML files with TB-Net integration
+            # html_paths = visualize_separate_tsne_3d_with_ilo2_and_tb_networks(
+            #     model=model, 
+            #     device=device, 
+            #     data_loaders=data_loaders,
+            #     loader_names=loader_names,
+            #     ilo_dataset=ilo_dataset,
+            #     tb_net_loader=tb_loader,    # Your TB-Net dataloader
+            #     experiment_name=experiment_name,
+            #     output_dir=f"tsne_html_new/{experiment_name}/individual_{model_type}_with_tbnet"
+            # )
 
 
             # Print the paths to all generated HTML files
@@ -2770,22 +1829,24 @@ if __name__ == "__main__":
             # for path in html_paths:
             #     print(f"  - {path}")
             
-            # visualize_tsne_with_kaggle_tb(model, device, "", None, mbod_merged_loader, tb_loader, trained=True,
-            #           log_to_wandb=False, n_epochs=epoch, set_name="Trained Model", entire_dataset=True, special_filename="MC-SZ")
+            # visualize_multiple_tsne_3d_with_ilo2_and_tb(
+            #     model=model, 
+            #     device=device, 
+            #     data_loaders=data_loaders,
+            #     loader_names=loader_names,
+            #     ilo_dataset=ilo_dataset,
+            #     experiment_name=experiment_name,
+            #     output_filename=f"{experiment_name}/TEST-multi_tsne3d_v3_{model_type}.html"
+            # )
+            visualize_tsne_with_kaggle_tb(model, device, experiment_name, ilo_dataset, mbod_merged_loader, mc_sz_loader, trained=True,
+                      log_to_wandb=False, n_epochs=epoch, set_name="Trained Model", entire_dataset=True, special_filename="MC-SZ")
             
-            # visualize_tsne_with_kaggle_tb(raw_model, device, "", None, mbod_merged_loader, tb_loader, trained=False,
-            #           log_to_wandb=False, n_epochs=None, set_name="Raw Model", entire_dataset=True, special_filename="MC-SZ")
-            
-            # create_tsne_plot(raw_model, device, "", None, mbod_merged_loader, tb_loader, False, False, set_name="", special_filename="857-tsne_publication-prof_score", # mbod_label_scheme="profusion_score", use_gridlines=False)
-            # create_tsne_plot(raw_model, device, "", None, mbod_merged_loader, tb_loader, False, False, set_name="", special_filename="857-tsne_publication-bin_sil", # mbod_label_scheme="binary_silicosis", use_gridlines=False)
-            
-            create_tsne_plot_2(raw_model, device, "", None, mbod_merged_loader, tb_loader, rand_merged_loader, False, False, special_filename="TEST3-rand_mbod_tbnet",
-                               mbod_label_scheme="multiclass_stb", rand_label_scheme="binary_silicosis", use_gridlines=False)
+            visualize_tsne_with_kaggle_tb(raw_model, device, experiment_name, ilo_dataset, mbod_merged_loader, mc_sz_loader, trained=False,
+                      log_to_wandb=False, n_epochs=None, set_name="Raw Model", entire_dataset=True, special_filename="MC-SZ")
 
-            create_tsne_plot(raw_model, device, "", None, mbod_merged_loader, tb_loader, False, False, set_name="", special_filename="857-tsne_publication-mstb", mbod_label_scheme="multiclass_stb", use_gridlines=False)
+
             # visualize_tsne(model, device, ilo_dataset, mbod_merged_loader, trained=True, log_to_wandb=False,
             #                n_epochs=epoch, set_name="Trained Model", entire_dataset=True, is_mstb=False)
-
 
     except KeyError as e:
         print(f"Missing configuration: {e}")

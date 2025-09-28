@@ -1,3 +1,4 @@
 *.yaml
 wandb/
 *.pth
+*.ipynb

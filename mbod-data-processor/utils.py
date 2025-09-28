@@ -78,7 +78,7 @@ class XRayResizer(object):
 
             return (
                 cv2.resize(
-                    img[0, :, :], (self.size, self.size), interpolation=cv2.INTER_AREA
+                    img[0, :, :], (self.size, self.size), interpolation=cv2.INTER_LANCZOS4
                 )
                 .reshape(1, self.size, self.size)
                 .astype(np.float32)

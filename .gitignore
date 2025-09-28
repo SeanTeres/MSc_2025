@@ -24,3 +24,6 @@ medvae/
 *.md
 /home/sean/MSc_2025/classification/
 CheSS/
+domain_adaptation/
+*.json
+.vscode/

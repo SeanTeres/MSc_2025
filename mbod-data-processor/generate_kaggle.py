@@ -14,7 +14,7 @@ if __name__ == "__main__":
         dataset = KaggleTBDataset(datapath=data_path)
 
         num_samples = len(dataset)
-        xrayresizer = XRayResizer(512)
+        xrayresizer = XRayResizer(512, engine="cv2")
         img_shape = xrayresizer(dataset[0]["img"])[0].shape
 
         hdf5_structure = {

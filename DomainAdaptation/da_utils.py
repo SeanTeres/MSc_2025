@@ -114,6 +114,25 @@ def reinitialize_weights(model):
                 nn.init.constant_(module.bias, 0)
 
 
+def initialize_weights(model, init_backbone=False):
+    print("Randomly initialising weights")
+
+    for module in model.classifier.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
+    if init_backbone:
+        for module in model.model.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+
 
 def multilabel_stb_to_multiclass(label):
     """Convert a multilabel_stb vector to multiclass_stb integer."""

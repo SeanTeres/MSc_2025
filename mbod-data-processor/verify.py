@@ -17,6 +17,9 @@ def visualise(dataset):
     # Extract the labels for the given label scheme
     labels = dataset.get_labels()
 
+    for lab in labels:
+        print(lab)
+
     # Compute support
     if labels.ndim == 1:  # Single-class labels
         unique_labels, support = np.unique(labels, return_counts=True)

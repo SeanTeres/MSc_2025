@@ -11,3 +11,5 @@ wheels/
 
 # H5PY Files (Datasets should not be committed to github)
 *.h5
+*.png
+*.jpg

@@ -31,133 +31,17 @@ import torch.nn.functional as F
 from pytorch_metric_learning import miners, losses
 from pytorch_metric_learning.distances import LpDistance, CosineSimilarity
 
+sys.path.append(os.path.abspath("../codev2"))
 from da_utils import visualize_tsne_with_kaggle_tb, analyze_mined_triplets, reinitialize_weights, ForeverDataIterator
-sys.path.append(os.path.abspath("../classification"))
-
+import cl_utils
+import cl_tllib_utils, cl_pml_utils
 from clf_manager import XRVBasedClassifier
 from clf_metrics import compute_binary_clf_metrics
 
 from txrv_wrapper import TxrvWrapper, AdaptivePoolingLayer, init_torchxrayvision_resnet_model
 
-from losses import CorrelationAlignmentLoss, JointMultipleKernelMaximumMeanDiscrepancy, GaussianKernel, MultipleKernelMaximumMeanDiscrepancy
+from losses import calculate_jmmd_loss, JointMultipleKernelMaximumMeanDiscrepancy, GaussianKernel, CorrelationAlignmentLoss, MultipleKernelMaximumMeanDiscrepancy
 
-def calculate_jmmd_loss_fixed(encoder, src_imgs, tgt_imgs, jmmd_loss_fn, layers=["layer1"], rescale_loss=True, return_final_features=False):
-    """
-    Calculate JMMD loss using features from multiple layers.
-    Args:
-        layers: list of layer names to use for JMMD computation (e.g., ["layer1", "layer2"])
-    """
-    if not layers:
-        raise ValueError("No layers specified for JMMD loss calculation.")
-
-    src_features = []
-    tgt_features = []
-    
-    # Forward pass through base layers (shared computation graph)
-    src_x = encoder.model.conv1(src_imgs)
-    src_x = encoder.model.bn1(src_x)
-    src_x = encoder.model.relu(src_x)
-    src_x = encoder.model.maxpool(src_x)
-    
-    tgt_x = encoder.model.conv1(tgt_imgs)
-    tgt_x = encoder.model.bn1(tgt_x)
-    tgt_x = encoder.model.relu(tgt_x)
-    tgt_x = encoder.model.maxpool(tgt_x)
-    
-    # Layer 1
-    src_x = encoder.model.layer1(src_x)
-    tgt_x = encoder.model.layer1(tgt_x)
-    
-    if "layer1" in layers:
-        src_feat1 = torch.flatten(encoder.model.avgpool(src_x), 1)
-        tgt_feat1 = torch.flatten(encoder.model.avgpool(tgt_x), 1)
-        src_features.append(src_feat1)
-        tgt_features.append(tgt_feat1)
-    
-    # Layer 2 (if requested)
-    if "layer2" in layers or "layer3" in layers or return_final_features:
-        src_x = encoder.model.layer2(src_x)
-        tgt_x = encoder.model.layer2(tgt_x)
-        
-        if "layer2" in layers:
-            src_feat2 = torch.flatten(encoder.model.avgpool(src_x), 1)
-            tgt_feat2 = torch.flatten(encoder.model.avgpool(tgt_x), 1)
-            src_features.append(src_feat2)
-            tgt_features.append(tgt_feat2)
-    
-    # Layer 3 (if requested)
-    if "layer3" in layers or return_final_features:
-        src_x = encoder.model.layer3(src_x)
-        tgt_x = encoder.model.layer3(tgt_x)
-        
-        if "layer3" in layers:
-            src_feat3 = torch.flatten(encoder.model.avgpool(src_x), 1)
-            tgt_feat3 = torch.flatten(encoder.model.avgpool(tgt_x), 1)
-            src_features.append(src_feat3)
-            tgt_features.append(tgt_feat3)
-    
-    # Final layer 4 for complete features (if requested)
-    if return_final_features:
-        src_x = encoder.model.layer4(src_x)
-        tgt_x = encoder.model.layer4(tgt_x)
-        
-        # Get final features (equivalent to encoder.features() but reusing computation)
-        src_final = torch.flatten(encoder.model.avgpool(src_x), 1)
-        tgt_final = torch.flatten(encoder.model.avgpool(tgt_x), 1)
-
-    # Compute JMMD loss with proper gradient flow
-    jmmd_loss = jmmd_loss_fn(tuple(src_features), tuple(tgt_features))
-
-    if rescale_loss:
-        # Count total number of kernels across all layers
-        total_kernels = sum(len(kernel_set) for kernel_set in jmmd_loss_fn.kernels)
-        num_layers = len(src_features)
-        jmmd_loss = jmmd_loss / (total_kernels * num_layers)
-
-    if return_final_features:
-        return jmmd_loss, src_final, tgt_final
-    else:
-        return jmmd_loss
-
-def reset_experiment_state():
-    """Helper function to reset all experiment state"""
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
-def set_random_seeds(seed=42):
-    """Set random seeds for reproducibility across all libraries"""
-    import random
-    import numpy as np
-    import torch
-    import os
-    
-    # Python built-in random
-    random.seed(seed)
-    
-    # NumPy
-    np.random.seed(seed)
-    
-    # PyTorch
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    
-    # PyTorch backends
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Environment variables for additional libraries
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
-    # For sklearn (if used)
-    try:
-        from sklearn.utils import check_random_state
-        check_random_state(seed)
-    except ImportError:
-        pass
-    
-    print(f"🌱 Random seeds set to {seed} for reproducibility")
-    return seed
 
 def safe_mean(losses):
     if isinstance(losses, Tensor) and losses.numel() > 0:
@@ -234,43 +118,9 @@ def compute_feature_distance_stats(src_feats: torch.Tensor, tgt_feats: torch.Ten
         })
         
         return stats
-    
-def set_random_seeds(seed=42):
-    """Set random seeds for reproducibility across all libraries"""
-    import random
-    import numpy as np
-    import torch
-    import os
-    
-    # Python built-in random
-    random.seed(seed)
-    
-    # NumPy
-    np.random.seed(seed)
-    
-    # PyTorch
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    
-    # PyTorch backends
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Environment variables for additional libraries
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
-    # For sklearn (if used)
-    try:
-        from sklearn.utils import check_random_state
-        check_random_state(seed)
-    except ImportError:
-        pass
-    
-    print(f"🌱 Random seeds set to {seed} for reproducibility")
-    return seed
 
 if __name__ == "__main__":
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print("*" * 50)
     print(f"Using device: {device}")
     print("*" * 50)
@@ -281,7 +131,7 @@ if __name__ == "__main__":
     augmentations_list = transforms.Compose([
     transforms.RandomRotation(degrees=10, expand=False, fill=0),
     # transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0)),
-    # transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), fill=0)
     ])
 
@@ -293,7 +143,7 @@ if __name__ == "__main__":
         # transforms.Normalize(mean=[0.5], std=[0.5])
         ])
 
-    set_random_seeds(seed=random_seed)  # Set a fixed seed for reproducibility
+    cl_utils.set_random_seeds(seed=random_seed)  # Set a fixed seed for reproducibility
 
     try:
         cfg = load_config(defaults["DATA_CONFIG"]["path"])
@@ -305,9 +155,6 @@ if __name__ == "__main__":
             
             exp_name = exp_cfg["name"]
             print(f"Running experiment: {exp_name}")
-
-            model = None
-            optimizer = None
 
             if(exp_cfg.get("resolution", 999) == 512):
                 print("Using model at 512x512")
@@ -364,7 +211,7 @@ if __name__ == "__main__":
             )
 
             kaggle_tb_dataset = HDF5Dataset(
-                hdf5_path=cfg["MC_SZ_TB"]["outputpath"],
+                hdf5_path=cfg["kaggle_TB"]["outputpath"],
                 labels_key="tuberculosis",  # Main pathology labels, 'lab' for all labels
                 images_key="images",
                 augmentations=None,
@@ -390,11 +237,11 @@ if __name__ == "__main__":
             )
 
             train_loader_tbnet, _, _ = get_dataloaders(
-                hdf5_path=cfg["MC_SZ_TB"]["outputpath"],
+                hdf5_path=cfg["kaggle_TB"]["outputpath"],
                 preprocess=preprocess,
                 batch_size=exp_cfg["src_batch_size"],
                 labels_key="tuberculosis",
-                split_file="/home/sean/MSc_2025/domain_adaptation/stratified_split_mc_sz_TB.json",
+                split_file="stratified_split_tb_net.json",
                 augmentations=augmentations_list,
                 oversample=False
             )
@@ -409,11 +256,11 @@ if __name__ == "__main__":
                 oversample=False
             )
             _, val_loader_tbnet, test_loader_tbnet = get_dataloaders(
-                hdf5_path=cfg["MC_SZ_TB"]["outputpath"],
+                hdf5_path=cfg["kaggle_TB"]["outputpath"],
                 preprocess=preprocess,
                 batch_size=exp_cfg["src_batch_size"],
                 labels_key="tuberculosis",
-                split_file="/home/sean/MSc_2025/domain_adaptation/stratified_split_mc_sz_TB.json",
+                split_file="/home/sean/MSc_2025/mbod-data-processor/stratified_split_tb_net.json",
                 augmentations=None,
                 oversample=False
                 )
@@ -463,18 +310,8 @@ if __name__ == "__main__":
             # mmd_kernels = (GaussianKernel(alpha=0.5).to(device), GaussianKernel(alpha=1.0).to(device), GaussianKernel(alpha=2.0).to(device))
             # mmd_loss_fn = MultipleKernelMaximumMeanDiscrepancy(mmd_kernels).to(device)
 
-            kernels_per_layer = []
-            for _ in exp_cfg.get("jmmd_config", {}).get("layers", ["layer1"]):
-                layer_kernels = tuple(GaussianKernel(alpha=alpha).to(device) 
-                                    for alpha in [0.25, 0.5, 1.0, 2.0, 3.0])
-                kernels_per_layer.append(layer_kernels)
-
-            jmmd_loss_fn = JointMultipleKernelMaximumMeanDiscrepancy(
-                kernels=tuple(kernels_per_layer)
-            ).to(device)
-
-            # layer1_kernels = tuple(GaussianKernel(alpha=alpha).to(device) for alpha in [0.25, 0.5, 1.0, 2.0, 3.0])
-            # jmmd_loss_fn = JointMultipleKernelMaximumMeanDiscrepancy((layer1_kernels, )).to(device)
+            layer1_kernels = tuple(GaussianKernel(alpha=alpha).to(device) for alpha in [0.25, 0.5, 1.0, 2.0, 3.0])
+            jmmd_loss_fn = JointMultipleKernelMaximumMeanDiscrepancy((layer1_kernels, )).to(device)
 
             mmd_loss = MultipleKernelMaximumMeanDiscrepancy
 
@@ -535,30 +372,17 @@ if __name__ == "__main__":
                     src_imgs, src_labels = src_batch[0].to(device), src_batch[1].to(device)
                     tgt_imgs, tgt_labels = tgt_batch[0].to(device), tgt_batch[1].to(device)
 
-                    # ==== FIXED JMMD COMPUTATION WITH PROPER GRADIENT FLOW ====
-                    # This replaces the problematic double computation
+                    # Compute JMMD before feature extraction to save memory
                     if src_imgs.size(0) != tgt_imgs.size(0):
                         min_batch = min(src_imgs.size(0), tgt_imgs.size(0))
-                        # Compute JMMD AND get final features in one pass to avoid double computation
-                        jmmd_loss, src_feats, tgt_feats = calculate_jmmd_loss_fixed(
-                            model, src_imgs[:min_batch], tgt_imgs[:min_batch], 
-                            jmmd_loss_fn, layers=exp_cfg.get("jmmd_config", {}).get("layers", ["layer1"]),  # Use config layers
-                            rescale_loss=True, return_final_features=True
-                        )
-                        # Use the remaining images for feature extraction
-                        if src_imgs.size(0) > min_batch:
-                            remaining_src_feats = model.features(src_imgs[min_batch:])
-                            src_feats = torch.cat([src_feats, remaining_src_feats], dim=0)
-                        if tgt_imgs.size(0) > min_batch:
-                            remaining_tgt_feats = model.features(tgt_imgs[min_batch:])
-                            tgt_feats = torch.cat([tgt_feats, remaining_tgt_feats], dim=0)
+                        # Compute JMMD with equal-sized batches
+                        jmmd_loss = calculate_jmmd_loss(model, src_imgs[:min_batch], tgt_imgs[:min_batch], jmmd_loss_fn, layers="layer 1 only", rescale_loss=True)
+                    
                     else:
-                        # Equal batch sizes - compute everything in one pass
-                        jmmd_loss, src_feats, tgt_feats = calculate_jmmd_loss_fixed(
-                            model, src_imgs, tgt_imgs, jmmd_loss_fn, 
-                            layers=exp_cfg.get("jmmd_config", {}).get("layers", ["layer1"]),  # Use config layers
-                            rescale_loss=True, return_final_features=True
-                        )
+                        jmmd_loss = calculate_jmmd_loss(model, src_imgs, tgt_imgs, jmmd_loss_fn, layers="layer 1 only", rescale_loss=True)    
+  
+                    src_feats = model.features(src_imgs)
+                    tgt_feats = model.features(tgt_imgs)
 
                     coral_loss = coral_fn(src_feats, tgt_feats)
 
@@ -634,11 +458,8 @@ if __name__ == "__main__":
 
                     src_triplet_loss_val = safe_mean(src_loss_dict["loss"]["losses"]) * exp_cfg["component_weights"]["src_triplet_weight"]
                     tgt_triplet_loss_val = safe_mean(tgt_loss_dict["loss"]["losses"]) * exp_cfg["component_weights"]["tgt_triplet_weight"]
-                    
-                    # FIXED: Use proper cross_domain_weight instead of inconsistent weights
-                    cross_domain_weight = exp_cfg["component_weights"].get("cross_domain_weight", exp_cfg["component_weights"]["tgt_triplet_weight"])
-                    ts_triplet_loss_val = safe_mean(ts_loss_dict["loss"]["losses"]) * cross_domain_weight
-                    st_triplet_loss_val = safe_mean(st_loss_dict["loss"]["losses"]) * cross_domain_weight
+                    ts_triplet_loss_val = safe_mean(ts_loss_dict["loss"]["losses"]) * exp_cfg["component_weights"]["src_triplet_weight"]
+                    st_triplet_loss_val = safe_mean(st_loss_dict["loss"]["losses"]) * exp_cfg["component_weights"]["tgt_triplet_weight"]
 
                     coral_loss_val = coral_loss * exp_cfg["component_weights"]["coral_weight"]
                     jmmd_loss_val = jmmd_loss * exp_cfg["component_weights"]["jmmd_weight"]
@@ -660,7 +481,7 @@ if __name__ == "__main__":
                     # print(f"Source triplet loss (weighted): {src_triplet_loss_val.item()}, Target triplet loss (weighted): {tgt_triplet_loss_val.item()}")
 
 
-                    # Add to loss list - ABLATION FRAMEWORK
+                    # Add to loss list
                     loss_list = []
 
                     # Source triplet loss
@@ -673,6 +494,8 @@ if __name__ == "__main__":
 
                     # Cross-domain triplet losses (st and ts)
                     if exp_cfg["loss_components"].get("cross_domain_triplet", False):
+                        # Note: You're currently using src_triplet_weight for ts and tgt_triplet_weight for st
+                        # You might want to use cross_domain_weight instead
                         loss_list.append(st_triplet_loss_val)
                         loss_list.append(ts_triplet_loss_val)
                     
@@ -691,7 +514,7 @@ if __name__ == "__main__":
                         if exp_cfg["component_weights"]["tgt_clf_weight"] > 0:
                             loss_list.append(tgt_clf_loss)
 
-                    # Filter valid losses and optimize
+                    # Filter valid losses
                     valid_losses = [l for l in loss_list if l.requires_grad and not torch.isnan(l).any()]
                     if valid_losses:
                         total_loss = sum(valid_losses)
@@ -701,10 +524,9 @@ if __name__ == "__main__":
                         valid_steps += 1
                     else:
                         invalid_steps += 1
-                        print(f"Step {step}: No valid losses to optimize! Loss components active: {[k for k, v in exp_cfg['loss_components'].items() if v]}")
 
                     wandb.log({
-                        "batch/total_loss": total_loss.item() if valid_losses else 0.0,
+                        "batch/total_loss": total_loss.item(),
                         "batch/coral_loss": coral_loss.item(),
                         "batch/src_triplet_loss": src_triplet_loss.item(),
                         "batch/tgt_triplet_loss": tgt_triplet_loss.item(),
@@ -717,6 +539,7 @@ if __name__ == "__main__":
                         "batch/jmmd_loss": jmmd_loss.item() if exp_cfg["loss_components"]["jmmd"] else 0.0,
                     })
             
+                cl_metrics = cl_pml_utils.compute_comprehensive_metrics(model, device, train_loader_tbnet, train_loader_mbod, epoch=epoch+1)     # TO DO: double-check this calculation
 
                 all_src_labels = np.concatenate(all_src_labels, axis=0)
                 all_tgt_labels = np.concatenate(all_tgt_labels, axis=0)
@@ -746,6 +569,11 @@ if __name__ == "__main__":
                     "train/num_ts_triplets": num_ts_triplets,
                     "valid_steps": valid_steps,
                     "invalid_steps": invalid_steps,
+                    "train/src_intra_similarity": cl_metrics["src_intra_similarity"],
+                    "train/tgt_intra_similarity": cl_metrics["tgt_intra_similarity"],
+                    "train/inter_domain_similarity": cl_metrics["inter_domain_similarity"],
+                    "train/src_map": cl_metrics["src_map"],
+                    "train/tgt_map": cl_metrics["tgt_map"],
 
 
                     "train_clf/src_clf_loss": train_src_clf_loss,
@@ -780,6 +608,7 @@ if __name__ == "__main__":
     
                 model.eval()
                 with torch.no_grad():
+                    val_cl_metrics = cl_pml_utils.compute_comprehensive_metrics(model, device, val_loader_tbnet, val_loader_mbod, epoch=epoch+1)
                     val_steps_per_epoch = max(len(val_loader_tbnet), len(val_loader_mbod))
 
                     val_src_iter = ForeverDataIterator(val_loader_tbnet)
@@ -843,6 +672,11 @@ if __name__ == "__main__":
                         "val_clf/tgt_accuracy": val_tgt_metrics["accuracy"],
                         "val_clf/tgt_specificity_at_90%_sensitivity": val_tgt_metrics["specificity_at_90%_sensitivity"],
                         "val_clf/tgt_cohen_kappa": val_tgt_metrics["cohen_kappa"],
+                        "val/src_intra_similarity": val_cl_metrics["src_intra_similarity"],
+                        "val/tgt_intra_similarity": val_cl_metrics["tgt_intra_similarity"],
+                        "val/inter_domain_similarity": val_cl_metrics["inter_domain_similarity"],
+                        "val/src_map": val_cl_metrics["src_map"],
+                        "val/tgt_map": val_cl_metrics["tgt_map"],
                         "val_clf/src_tpr": val_src_metrics["tpr"],
                         "val_clf/src_fpr": val_src_metrics["fpr"],
                         "val_clf/tgt_tpr": val_tgt_metrics["tpr"],
@@ -852,16 +686,16 @@ if __name__ == "__main__":
 
             print(f"Experiment {exp_name} completed successfully. Starting next experiment...")
             wandb.finish()
-            del model, optimizer, jmmd_loss_fn
-            reset_experiment_state()
+
     except KeyError as e:
         print(f"Missing configuration: {e}")
 
 
 # -------- NOTES ---------
-# FIXED ISSUES:
-# 1. JMMD gradient flow now properly maintained through single computational graph
-# 2. Cross-domain triplet loss weights now use proper cross_domain_weight
-# 3. Added better error logging for invalid losses
-# 4. Eliminated double computation by computing JMMD and final features together
-# 5. Project name includes "FIXED" to differentiate from original runs
+# Original Paper used JMMD weight as 1.0 and Triplet loss weight as 1.0
+# They used batch size of 32 for both source and target
+# They used INV learning rate strategy
+# SGD for optimization
+# FIRST, train extractor and classifier using JMMD and Cross entropy for 6000 iterations
+# Then, train entire system (including Triplet Loss) for 30000 iterations
+#  

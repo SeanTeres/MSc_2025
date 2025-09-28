@@ -122,23 +122,23 @@ if __name__ == "__main__":
         }
 
         wandb.login(key = '176da722bd80e35dbc4a8cea0567d495b7307688')
-        wandb.init(project='MBOD-cl-3', name='Quad_Original-XRV_clf_025-m_02-b32',
+        wandb.init(project='MBOD-cl-3', name='Quad_OG-n2_v1XRV_clf_025-m_03-b16',
             config={
                 "seed": 42,  # ADD THIS
                 "experiment_type": "Quadruplet (Original)",
-                "n2_selection": "Original Paper", # Decide how we select N2 samples (label-based only) ---> Remember, no SH constraints here (for now)
+                "n2_selection": "Proposed-v1", # Decide how we select N2 samples (label-based only) ---> Remember, no SH constraints here (for now)
                 "n1_selection": "MSTB-based", # Profusion-based or MSTB-based
                 "prioritize_prof_n1": False,  # Prioritize highest profusion difference for N1 samples
                 "beta_factor": 0.25, # The ratio between the two margins in quadruplet loss
                 "dataset": "MBOD ONLY",
                 "labeling_scheme": "MSTB",
-                "batch_size": 32,
+                "batch_size": 16,
                 "n_epochs": 1000,
                 "learning_rate": 1e-4,
                 "oversample": True,
                 "OS_factor": 0.5,  # Oversampling factor
                 "initial_margin": 0.05,      
-                "final_margin": 0.2,        
+                "final_margin": 0.3,        
                 "margin_scheduling": True,   # Enable margin scheduling
                 "margin_schedule_scheme": "Epoch-Sine", # Can be None, "Epoch-Sine", "Linear", "Batch-Adaptive"
                 "scheduling_fraction": 0.75,  # Complete scheduling in first x% of training
@@ -239,7 +239,7 @@ if __name__ == "__main__":
                 split_file="stratified_split_mstb_new.json",
                 augmentations=augmentations_list,
                 oversample=wandb.config.oversample,
-                scaling_factor = wandb.config.OS_factor 
+                 
             )
 
             _, val_loader, test_loader = get_dataloaders(
@@ -250,7 +250,7 @@ if __name__ == "__main__":
                 split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=None,
-                scaling_factor = wandb.config.OS_factor 
+                 
             )
 
         else:
@@ -262,7 +262,7 @@ if __name__ == "__main__":
                 split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=wandb.config.oversample,
-                scaling_factor = wandb.config.OS_factor
+                
             )
 
             _, val_loader, test_loader = get_dataloaders(
@@ -273,7 +273,7 @@ if __name__ == "__main__":
                 split_file="stratified_split_mstb_new.json",
                 augmentations=None,
                 oversample=None,
-                scaling_factor = wandb.config.OS_factor
+                
             )
 
         if(wandb.config.weighted_clf_loss and wandb.config.active_classifier == "multiclass_profusion"):

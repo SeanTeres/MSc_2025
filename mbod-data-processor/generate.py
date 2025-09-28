@@ -19,18 +19,20 @@ if __name__ == "__main__":
             radiologist_findings_columns=config["silicosis_857"][
                 "radiologist_findings_columns"
             ],
-            profusion_score_column=config["silicosis_857"]["profusion_score_column"],
+            profusion_score_columns=config["silicosis_857"]["profusion_score_columns"]
         )
         d_silicosis_v2 = MBODSilicosisDataset(
             imgpath=config["silicosis_1179"]["imgpath"],
-            csvpath=config["silicosis_1179"]["csvpath"],
+            csvpath=config["silicosis_1179"]["csvpath"]
         )
 
         d_silicosis_merge = MergeDataset([d_silicosis_v1, d_silicosis_v2])
 
+        # d_silicosis_merge = d_silicosis_v1
+
         # Define the structure of the HDF5 dataset
         num_samples = len(d_silicosis_merge)
-        xrayresizer = XRayResizer(image_size)
+        xrayresizer = XRayResizer(image_size, engine="cv2")
         img_shape = xrayresizer(d_silicosis_merge[0]["img"])[0].shape
         hdf5_structure = {
             "images": {
@@ -49,26 +51,14 @@ if __name__ == "__main__":
             "active_tuberculosis": {"shape": (num_samples,), "dtype": np.int8},
             "full_tuberculosis": {"shape": (num_samples, 4), "dtype": np.int8},
             "profusion_score": {"shape": (num_samples,), "dtype": np.int8},
+            "multiclass_stb": {"shape": (num_samples,), "dtype": np.int8},
+            "multilabel_stb": {"shape": (num_samples, 3), "dtype": np.int8},
         }
 
         save_to_h5py(
             dataset=d_silicosis_merge,
             hdf5_structure=hdf5_structure,
             filename=config["merged_silicosis_output"]["hdf5_file"],
-            xrayresizer=xrayresizer,
-        )
-
-        save_to_h5py(
-            dataset=d_silicosis_v1,
-            hdf5_structure=hdf5_structure,
-            filename=config["mbod_857_silicosis_output"]["hdf5_file"],
-            xrayresizer=xrayresizer,
-        )
-
-        save_to_h5py(
-            dataset=d_silicosis_v2,
-            hdf5_structure=hdf5_structure,
-            filename=config["mbod_1179_silicosis_output"]["hdf5_file"],
             xrayresizer=xrayresizer,
         )
     except KeyError as e:
