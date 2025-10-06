@@ -304,39 +304,22 @@ rand_v3_dataset_path = config["rand_v3_output"]["hdf5_file"]
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def denormalize_xray(tensor):
-    """Convert normalized tensor to torchxrayvision expected range [-1024, 1024]"""
+def normalize_to_hu_range(img_tensor):
+    """Normalize image tensor to Hounsfield Unit range (-1024, 1024)"""
+    min_val = img_tensor.min()
+    max_val = img_tensor.max()
     
-    # Check current range
-    current_min = tensor.min().item()
-    current_max = tensor.max().item()
+    # Scale to [0,1]
+    normalized = (img_tensor - min_val) / (max_val - min_val)
     
-    # print(f"Input range: [{current_min:.3f}, {current_max:.3f}]")
-    
-    # If data is in [0, 1] range (common after ToTensor)
-    if current_min >= 0 and current_max <= 1:
-        # Map [0, 1] to [-1024, 1024]
-        tensor = (tensor - 0.5) * 2048
-    
-    # If data is in [-1, 1] range
-    elif current_min >= -1 and current_max <= 1:
-        # Map [-1, 1] to [-1024, 1024]
-        tensor = tensor * 1024
-    
-    # If data is in some other normalized range, map to [-1024, 1024]
-    else:
-        # Generic normalization to [-1024, 1024]
-        tensor = (tensor - current_min) / (current_max - current_min)  # Map to [0, 1]
-        tensor = (tensor - 0.5) * 2048  # Map to [-1024, 1024]
-    
-    #print(f"Output range: [{tensor.min().item():.3f}, {tensor.max().item():.3f}]")
-    return tensor
+    # Scale to [-1024, 1024]
+    return normalized * 2048 - 1024
 
-# Updated preprocessing
 preprocess = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Lambda(denormalize_xray),
+    transforms.Lambda(normalize_to_hu_range)  # Scale [0,1] to [-1024,1024]
 ])
+
 # Create datasets
 mbod_merged = HDF5Dataset(
     hdf5_path=mbod_dataset_path,
@@ -355,7 +338,6 @@ rand_v3 = HDF5Dataset(
 
 
 # vae_model = MVAE(model_name="medvae_4_1_2d", modality="xray").to(device)
-model = xrv.models.ResNet(weights="resnet50-res512-all").to(device)
 
 rand_v3_loader = torch.utils.data.DataLoader(
     rand_v3, batch_size=8, shuffle=False
@@ -377,12 +359,13 @@ simclr_transform = transforms.Compose([
     #     transforms.RandomApply([
     #         transforms.ColorJitter(brightness=0.01, contrast=0.01)  # Only jitter 50% of time
     #     ], p=0.5),
-        transforms.RandomApply([
-            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))  # Only blur 30% of time
-        ], p=0.3),
+    transforms.RandomApply([
+        transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))  # Only blur 60% of time
+    ], p=0.6),
     
 ])
 model = xrv.models.ResNet(weights="resnet50-res512-all").to(device)
+
 
 simclr_model = SimCLR(model).to(device)
 
@@ -457,6 +440,24 @@ else:
 loader = torch.utils.data.DataLoader(
     simclr_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True
 )
+
+if not exp_cfg["MODEL"]["PRETRAINED"]:
+    def reinitialize_weights(model):
+        for module in model.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+    
+    reinitialize_weights(simclr_model)
+    print("Weights re-initialized.")
 
 
 wandb.login()
